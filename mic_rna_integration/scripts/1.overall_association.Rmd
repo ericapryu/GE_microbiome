@@ -1,0 +1,554 @@
+---
+title: "1.Overall_associations"
+output: html_document
+date: "2025-12-05"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Overall Association
+
+The purpose of this script is to analyze the global association between the transcriptome and the microbiome
+
+## load data
+```{r}
+rnaseq_count <- read.csv("../../rnaseq/2.rnaseq_analysis/output/counts_uncorr_fin_woOutlier.csv", header = TRUE, row.names = 1)
+rnaseq_meta <- read.csv("../../rnaseq/2.rnaseq_analysis/output/metadata_fin_woOutlier.csv", header = TRUE, row.names = 1)
+micro_ps <- readRDS("../../microbiome/3.microbiome_analysis/output/phyloseq_sampleReads_unadj.rds")
+```
+
+## load packages
+```{r}
+library(ggplot2)
+library(DESeq2)
+library(phyloseq)
+library(vegan)
+library(lme4)
+```
+
+## load functions
+```{r}
+## microbiome correction
+correct_microbiome_region <- function(micro_ordinated, region_ps) {
+  # create empty result matrix with same dimensions
+  micro_corrected <- as.data.frame(
+    matrix(nrow = nrow(micro_ordinated), ncol = ncol(micro_ordinated))
+  )
+  colnames(micro_corrected) <- colnames(micro_ordinated)
+  rownames(micro_corrected) <- rownames(micro_ordinated)
+
+  # add variables
+  micro_ordinated$i.Sex <- as.factor(region_ps@sam_data$i.Sex)
+  micro_ordinated$i.Age <- as.numeric(region_ps@sam_data$i.Age)
+  micro_ordinated$ex.ExtractionBatch <- as.factor(region_ps@sam_data$ex.ExtractionBatch)
+  micro_ordinated$p.CleanedPCRConcentration <- as.numeric(region_ps@sam_data$p.CleanedPCRConcentration)
+
+  n <- 1
+  set.seed(123)
+  for (i in colnames(micro_corrected)) {
+    obj <- lm(
+      as.formula(
+        paste0("`", i, "`", " ~ i.Sex + i.Age + ex.ExtractionBatch + p.CleanedPCRConcentration")
+      ),
+      data = micro_ordinated
+    )
+    micro_corrected[, i] <- resid(obj)
+    print(n)
+    n <- n + 1
+  }
+
+  return(micro_corrected)
+}
+
+
+## rnaseq correction
+correct_rnaseq_region <- function(rna_ordinated, region_meta) {
+  # create empty result matrix with same dimensions
+  rna_corrected <- as.data.frame(
+    matrix(nrow = nrow(rna_ordinated), ncol = ncol(rna_ordinated))
+  )
+  colnames(rna_corrected) <- colnames(rna_ordinated)
+  rownames(rna_corrected) <- rownames(rna_ordinated)
+
+  # add variables
+  rna_ordinated$i.Sex <- as.factor(region_meta$i.Sex)
+  rna_ordinated$i.Age <- as.numeric(region_meta$i.Age)
+  rna_ordinated$p.LibraryConcentration_ngul <- as.numeric(region_meta$p.LibraryConcentration_ngul)
+  rna_ordinated$s.SequencingBatch <- as.factor(region_meta$s.SequencingBatch)
+  rna_ordinated$ex.Extractedby <- as.factor(region_meta$ex.Extractedby)
+  rna_ordinated$ex.RINscore <- as.numeric(region_meta$ex.RINscore)
+
+  n <- 1
+  set.seed(123)
+  for (i in colnames(rna_corrected)) {
+    obj <- lm(
+      as.formula(
+        paste0("`", i, "`", "~ i.Sex + i.Age + p.LibraryConcentration_ngul + ex.RINscore + ex.Extractedby + s.SequencingBatch")
+      ),
+      data = rna_ordinated
+    )
+    rna_corrected[, i] <- resid(obj)
+    print(n)
+    n <- n + 1
+  }
+
+  return(rna_corrected)
+}
+```
+
+## filter to overlapping CD patients and adjust order
+```{r}
+micro_overlap_ps <- subset_samples(micro_ps, UNQ_ID != "NA")
+CD_overlap_ps <- subset_samples(micro_overlap_ps, i.Disease == "Crohns")
+
+rnaseq_meta_overlap <- subset(rnaseq_meta, UNQ_ID != "NA")
+rna_meta_CD <- subset(rnaseq_meta_overlap, i.Disease == "Crohns")
+
+## adjust order of rna metadata based on microbiome
+rna_meta_CD_reorder <- rna_meta_CD[order(match(rna_meta_CD$UNQ_ID, CD_overlap_ps@sam_data$UNQ_ID)),]
+
+rna_count_CD <- subset(rnaseq_count, rownames(rnaseq_count) %in% rna_meta_CD_reorder$p.LibraryID)
+
+## adjust order of rna count based on rna metadata
+rna_count_CD_reorder <- rna_count_CD[order(match(rownames(rna_count_CD), rna_meta_CD_reorder$p.LibraryID)),]
+
+rownames(rna_count_CD_reorder) <- rna_meta_CD_reorder$UNQ_ID
+
+rna_count_CD_reorder_t <- t(rna_count_CD_reorder)
+
+## check order
+identical(CD_overlap_ps@sam_data$UNQ_ID, rownames(rna_count_CD_reorder))
+```
+
+## calculate distance for procrustes across intestine
+```{r}
+# calculate aitchison distance for microbes and ordinate
+CD_overlap_RA <- transform_sample_counts(CD_overlap_ps, function(otu) otu/sum(otu))
+
+set.seed(123)
+CD_overlap_otu <- as.data.frame(as.matrix(CD_overlap_RA@otu_table))
+identical(CD_overlap_ps@sam_data$s.SequencingID, rownames(CD_overlap_otu))
+rownames(CD_overlap_otu) <- CD_overlap_ps@sam_data$UNQ_ID
+
+micro_uncorr_dist <- vegdist(CD_overlap_otu, method = "aitchison", pseudocount = 0.000001)
+micro_pcoa <- ape::pcoa(micro_uncorr_dist)
+
+micro_ord <- as.data.frame(micro_pcoa$vectors)
+
+
+# calculate aitchison distance for rnaseq
+## transform
+set.seed(123)
+dds_full <- DESeqDataSetFromMatrix(countData = rna_count_CD_reorder_t, colData = rna_meta_CD_reorder, design = ~ 1)
+
+## normalize across at least 1/3 of the samples
+smallestGroupSize <- ncol(rna_count_CD_reorder_t)/3
+  keep <- rowSums(counts(dds_full) >= 10) >= smallestGroupSize
+  dds_full <- dds_full[keep,]
+set.seed(123)
+vsd_full <- vst(dds_full, blind=FALSE)
+mat_full <- assay(vsd_full)
+
+
+## distance
+mat_t <- t(mat_full)
+set.seed(123)
+rna_uncorr_dist <- vegdist(mat_t, method = "aitchison", pseudocount = 0.000001) 
+rna_pcoa <- ape::pcoa(rna_uncorr_dist)
+
+rnaseq_ord <- as.data.frame(rna_pcoa$vectors)
+```
+
+## correct matrices for covariates, including specimen
+```{r}
+# microbiome
+micro_ord_corr <- as.data.frame(matrix(nrow = nrow(micro_ord), ncol = ncol(micro_ord)))
+
+colnames(micro_ord_corr) <- colnames(micro_ord)
+rownames(micro_ord_corr) <- rownames(micro_ord)
+
+### check names
+identical(CD_overlap_ps@sam_data$UNQ_ID, rownames(micro_ord_corr))
+
+### add variable
+micro_ord$i.Sex <- as.factor(CD_overlap_ps@sam_data$i.Sex)
+micro_ord$i.Age <- as.numeric(CD_overlap_ps@sam_data$i.Age)
+micro_ord$ex.ExtractionBatch <- as.factor(CD_overlap_ps@sam_data$ex.ExtractionBatch)
+micro_ord$p.CleanedPCRConcentration <- as.numeric(CD_overlap_ps@sam_data$p.CleanedPCRConcentration)
+micro_ord$i.PatientID <- as.factor(CD_overlap_ps@sam_data$i.PatientID)
+micro_ord$i.Specimen <- as.factor(CD_overlap_ps@sam_data$i.Specimen)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(micro_ord_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + ex.ExtractionBatch + p.CleanedPCRConcentration + i.Specimen + (1 | i.PatientID)")),  data = micro_ord)
+  micro_ord_corr[, i] <- resid(obj)
+  print(n)
+  n = n + 1
+}
+
+
+# rnaseq
+rnaseq_ord_corr <- as.data.frame(matrix(nrow = nrow(rnaseq_ord), ncol = ncol(rnaseq_ord)))
+
+colnames(rnaseq_ord_corr) <- colnames(rnaseq_ord)
+rownames(rnaseq_ord_corr) <- rownames(rnaseq_ord)
+
+### check order
+identical(rna_meta_CD_reorder$UNQ_ID, rownames(rnaseq_ord_corr))
+
+### add variable
+rnaseq_ord$i.Sex <- as.factor(rna_meta_CD_reorder$i.Sex)
+rnaseq_ord$i.Age <- as.numeric(rna_meta_CD_reorder$i.Age)
+rnaseq_ord$p.LibraryConcentration_ngul <- as.numeric(rna_meta_CD_reorder$p.LibraryConcentration_ngul)
+rnaseq_ord$s.SequencingBatch <- as.factor(rna_meta_CD_reorder$s.SequencingBatch)
+rnaseq_ord$ex.Extractedby <- as.factor(rna_meta_CD_reorder$ex.Extractedby)
+rnaseq_ord$ex.RINscore <- as.numeric(rna_meta_CD_reorder$ex.RINscore)
+rnaseq_ord$i.PatientID <- as.factor(rna_meta_CD_reorder$i.PatientID)
+rnaseq_ord$i.Specimen <- as.factor(rna_meta_CD_reorder$i.Specimen)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(rnaseq_ord_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.LibraryConcentration_ngul + ex.RINscore + ex.Extractedby + s.SequencingBatch + i.Specimen + (1 | i.PatientID)")),  data = rnaseq_ord)
+  rnaseq_ord_corr[, i] <- resid(obj)
+  print(n)
+  n = n + 1
+}
+
+## check order
+identical(rownames(micro_ord_corr), rownames(rnaseq_ord_corr))
+```
+
+## procrustes across intestine
+```{r}
+set.seed(123)
+pro <- protest(X = rnaseq_ord_corr, Y = micro_ord_corr, scores = "sites", symmetric = TRUE, permutations = 99999)
+# plot(pro)
+
+pro_vals <- pro$t
+pro_vals <- as.data.frame(pro_vals)
+pro_nonper <- pro$t0
+
+procrustes_dist_plot <- ggplot(data = pro_vals, aes(x = pro_vals)) +
+  geom_histogram(binwidth = 0.01, fill = "dark grey") +
+    geom_vline(xintercept = pro_nonper, lty = 2, color = "red") +
+    labs(x = "Procrustes distribution", y = "Count") +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    theme(legend.position = "none")
+
+ggsave(file="../figures/procrustes_dist_plot.pdf", plot=procrustes_dist_plot, width=6, height=3)
+
+
+df_pro_Y <- data.frame(micro1 = pro$Yrot[,1], micro2 = pro$Yrot[,2])
+df_pro_X <- data.frame(rna1 = pro$X[,1], rna2 = pro$X[,2])
+
+
+procrustes_rna_plot <- ggplot(data = df_pro_X, aes(x = rna1, y = rna2)) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  lims(x = c(-0.03, 0.05), y = c(-0.1, 0.11)) +
+  labs(x = "rna PCOA1 (39.8%)",
+       y = "rna PCOA2 (9.3%)")
+
+ggsave(file="../figures/procrustes_rna_plot.pdf", plot=procrustes_rna_plot, width=3.5, height=3)
+  
+
+procrustes_mic_plot <- ggplot(data = df_pro_Y, aes(x = micro1, y = micro2)) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
+  lims(x = c(-0.03, 0.05), y = c(-0.1, 0.11)) +
+  labs(x = "micro PCOA1 (6.8%)",
+       y = "micro PCOA2 (4.9%)")
+
+ggsave(file="../figures/procrustes_mic_plot.pdf", plot=procrustes_mic_plot, width=3.5, height=3)
+
+
+procrustes_rna_mic_plot <- ggplot() +
+  geom_point(data = df_pro_X, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_segment(alpha = 0.3, aes(x = df_pro_Y$micro1, y = df_pro_Y$micro2), xend = df_pro_X$rna1, yend = df_pro_X$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
+  lims(x = c(-0.03, 0.05), y = c(-0.1, 0.11)) +
+  labs(x = "Dim 1",
+       y = "Dim 2")
+
+ggsave(file="../figures/procrustes_rna_mic_plot.pdf", plot=procrustes_rna_mic_plot, width=4, height=3.5)
+```
+
+## filter data by region
+```{r}
+## filter by region
+rna_meta_TI <- subset(rna_meta_CD_reorder, i.Specimen == "Terminal Ileum")
+rna_meta_C <- subset(rna_meta_CD_reorder, i.Specimen == "Cecum")
+rna_meta_RC <- subset(rna_meta_CD_reorder, i.Specimen == "Right Colon")
+
+micro_TI_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Terminal Ileum")
+micro_C_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Cecum")
+micro_RC_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Right Colon")
+```
+
+## calculate distance for procrustes by region
+```{r}
+# calculate aitchison distance for microbes and ordinate
+set.seed(123)
+TI_ps_RA <- transform_sample_counts(micro_TI_ps, function(otu) otu/sum(otu))
+
+TI_overlap_otu <- as.data.frame(as.matrix(TI_ps_RA@otu_table))
+identical(micro_TI_ps@sam_data$s.SequencingID, rownames(TI_overlap_otu))
+rownames(TI_overlap_otu) <- micro_TI_ps@sam_data$UNQ_ID
+
+TI_micro_uncorr_dist <- vegdist(TI_overlap_otu, method = "aitchison", pseudocount = 0.000001)
+TI_micro_pcoa <- ape::pcoa(TI_micro_uncorr_dist)
+
+micro_ord_TI <- as.data.frame(TI_micro_pcoa$vectors)
+
+
+set.seed(123)
+C_ps_RA <- transform_sample_counts(micro_C_ps, function(otu) otu/sum(otu))
+
+C_overlap_otu <- as.data.frame(as.matrix(C_ps_RA@otu_table))
+identical(micro_C_ps@sam_data$s.SequencingID, rownames(C_overlap_otu))
+rownames(C_overlap_otu) <- micro_C_ps@sam_data$UNQ_ID
+
+C_micro_uncorr_dist <- vegdist(C_overlap_otu, method = "aitchison", pseudocount = 0.000001)
+C_micro_pcoa <- ape::pcoa(C_micro_uncorr_dist)
+
+micro_ord_C <- as.data.frame(C_micro_pcoa$vectors)
+
+
+set.seed(123)
+RC_ps_RA <- transform_sample_counts(micro_RC_ps, function(otu) otu/sum(otu))
+
+RC_overlap_otu <- as.data.frame(as.matrix(RC_ps_RA@otu_table))
+identical(micro_RC_ps@sam_data$s.SequencingID, rownames(RC_overlap_otu))
+rownames(RC_overlap_otu) <- micro_RC_ps@sam_data$UNQ_ID
+
+RC_micro_uncorr_dist <- vegdist(RC_overlap_otu, method = "aitchison", pseudocount = 0.000001)
+RC_micro_pcoa <- ape::pcoa(RC_micro_uncorr_dist)
+
+micro_ord_RC <- as.data.frame(RC_micro_pcoa$vectors)
+
+
+# calculate aitchison distance
+## transform
+set.seed(123)
+dds_full_spec <- DESeqDataSetFromMatrix(countData = rna_count_CD_reorder_t, colData = rna_meta_CD_reorder, design = ~ i.Specimen)
+
+smallestGroupSize_spec <- 30
+keep_spec <- rowSums(counts(dds_full_spec) >= 10) >= smallestGroupSize_spec
+dds_full_spec <- dds_full_spec[keep_spec,]
+set.seed(123)
+vsd_spec <- vst(dds_full_spec, blind=FALSE)
+mat_spec <- assay(vsd_spec)
+
+mat_spec <- as.data.frame(mat_spec)
+
+mat_TI <- mat_spec[,colnames(mat_spec) %in% rna_meta_TI$UNQ_ID]
+mat_C <- mat_spec[,colnames(mat_spec) %in% rna_meta_C$UNQ_ID]
+mat_RC <- mat_spec[,colnames(mat_spec) %in% rna_meta_RC$UNQ_ID]
+
+## distance
+## TI
+mat_TI_t <- t(mat_TI)
+set.seed(123)
+rna_uncorr_TI_dist <- vegdist(mat_TI_t, method="aitchison") 
+rna_pcoa_TI <- ape::pcoa(rna_uncorr_TI_dist)
+
+rnaseq_ord_TI <- as.data.frame(rna_pcoa_TI$vectors)
+
+## C
+mat_C_t <- t(mat_C)
+set.seed(123)
+rna_uncorr_C_dist <- vegdist(mat_C_t, method="aitchison") 
+rna_pcoa_C <- ape::pcoa(rna_uncorr_C_dist)
+
+rnaseq_ord_C <- as.data.frame(rna_pcoa_C$vectors)
+
+## RC
+mat_RC_t <- t(mat_RC)
+set.seed(123)
+rna_uncorr_RC_dist <- vegdist(mat_RC_t, method = "aitchison") 
+rna_pcoa_RC <- ape::pcoa(rna_uncorr_RC_dist)
+
+rnaseq_ord_RC <- as.data.frame(rna_pcoa_RC$vectors)
+```
+
+## correct matrices
+```{r}
+# TI
+identical(rownames(micro_ord_TI), rownames(rnaseq_ord_TI))
+micro_ord_corr_TI <- correct_microbiome_region(micro_ord_TI, TI_ps_RA)
+rnaseq_ord_corr_TI <- correct_rnaseq_region(rnaseq_ord_TI, rna_meta_TI)
+
+# C
+identical(rownames(micro_ord_C), rownames(rnaseq_ord_C))
+micro_ord_corr_C <- correct_microbiome_region(micro_ord_C, C_ps_RA)
+rnaseq_ord_corr_C <- correct_rnaseq_region(rnaseq_ord_C, rna_meta_C)
+
+# RC
+identical(rownames(micro_ord_RC), rownames(rnaseq_ord_RC))
+micro_ord_corr_RC <- correct_microbiome_region(micro_ord_RC, RC_ps_RA)
+rnaseq_ord_corr_RC <- correct_rnaseq_region(rnaseq_ord_RC, rna_meta_RC)
+```
+
+## procrustes per region
+```{r}
+## TI
+set.seed(123)
+pro_TI <- protest(X = rnaseq_ord_corr_TI, Y = micro_ord_corr_TI, scores = "sites", symmetric = TRUE, permutations = 99999)
+# plot(pro)
+
+pro_vals_TI <- pro_TI$t
+pro_vals_TI <- as.data.frame(pro_vals_TI)
+pro_nonper_TI <- pro_TI$t0
+
+procrustes_dist_plot_TI <- ggplot(data = pro_vals_TI, aes(x = pro_vals_TI)) +
+  geom_histogram(binwidth = 0.01, fill = "dark grey") +
+    geom_vline(xintercept = pro_nonper_TI, lty = 2, color = "red") +
+    labs(x = "Procrustes distribution", y = "Count") +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    theme(legend.position = "none")
+
+ggsave(file="../figures/procrustes_dist_plot_TI.pdf", plot=procrustes_dist_plot_TI, width=4, height=3)
+
+
+df_pro_Y_TI <- data.frame(micro1 = pro_TI$Yrot[,1], micro2 = pro_TI$Yrot[,2])
+df_pro_X_TI <- data.frame(rna1 = pro_TI$X[,1], rna2 = pro_TI$X[,2])
+
+
+procrustes_rna_plot_TI <- ggplot(data = df_pro_X_TI, aes(x = rna1, y = rna2)) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "rna PCOA1 (19.3%)",
+       y = "rna PCOA2 (10.2%)")
+
+ggsave(file="../figures/procrustes_rna_plot_TI.pdf", plot=procrustes_rna_plot_TI, width=3.5, height=3)
+  
+
+procrustes_mic_plot_TI <- ggplot(data = df_pro_Y_TI, aes(x = micro1, y = micro2)) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "micro PCOA1 (9.0%)",
+       y = "micro PCOA2 (6.9%)")
+
+ggsave(file="../figures/procrustes_mic_plot_TI.pdf", plot=procrustes_mic_plot_TI, width=3.5, height=3)
+
+
+procrustes_rna_mic_plot_TI <- ggplot() +
+  geom_point(data = df_pro_X_TI, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y_TI, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_segment(alpha = 0.3, aes(x = df_pro_Y_TI$micro1, y = df_pro_Y_TI$micro2), xend = df_pro_X_TI$rna1, yend = df_pro_X_TI$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "Dim 1",
+       y = "Dim 2")
+
+ggsave(file="../figures/procrustes_rna_mic_plot_TI.pdf", plot=procrustes_rna_mic_plot_TI, width=4, height=3.5)
+
+
+
+## C
+set.seed(123)
+pro_C <- protest(X = rnaseq_ord_corr_C, Y = micro_ord_corr_C, scores = "sites", symmetric = TRUE, permutations = 99999)
+# plot(pro)
+
+pro_vals_C <- pro_C$t
+pro_vals_C <- as.data.frame(pro_vals_C)
+pro_nonper_C <- pro_C$t0
+
+procrustes_dist_plot_C <- ggplot(data = pro_vals_C, aes(x = pro_vals_C)) +
+  geom_histogram(binwidth = 0.01, fill = "dark grey") +
+    geom_vline(xintercept = pro_nonper_C, lty = 2, color = "red") +
+    labs(x = "Procrustes distribution", y = "Count") +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    theme(legend.position = "none")
+
+ggsave(file="../figures/procrustes_dist_plot_C.pdf", plot=procrustes_dist_plot_C, width=4, height=3)
+
+
+df_pro_Y_C <- data.frame(micro1 = pro_C$Yrot[,1], micro2 = pro_C$Yrot[,2])
+df_pro_X_C <- data.frame(rna1 = pro_C$X[,1], rna2 = pro_C$X[,2])
+
+
+procrustes_rna_plot_C <- ggplot(data = df_pro_X_C, aes(x = rna1, y = rna2)) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "rna PCOA1 (25.7%)",
+       y = "rna PCOA2 (10.2%)")
+
+ggsave(file="../figures/procrustes_rna_plot_C.pdf", plot=procrustes_rna_plot_C, width=3.5, height=3)
+  
+
+procrustes_mic_plot_C <- ggplot(data = df_pro_Y_C, aes(x = micro1, y = micro2)) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "micro PCOA1 (7.8%)",
+       y = "micro PCOA2 (5.7%)")
+
+ggsave(file="../figures/procrustes_mic_plot_C.pdf", plot=procrustes_mic_plot_C, width=3.5, height=3)
+
+
+procrustes_rna_mic_plot_C <- ggplot() +
+  geom_point(data = df_pro_X_C, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y_C, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_segment(alpha = 0.3, aes(x = df_pro_Y_C$micro1, y = df_pro_Y_C$micro2), xend = df_pro_X_C$rna1, yend = df_pro_X_C$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "Dim 1",
+       y = "Dim 2")
+
+ggsave(file="../figures/procrustes_rna_mic_plot_C.pdf", plot=procrustes_rna_mic_plot_C, width=4, height=3.5)
+
+
+
+## RC
+set.seed(123)
+pro_RC <- protest(X = rnaseq_ord_corr_RC, Y = micro_ord_corr_RC, scores = "sites", symmetric = TRUE, permutations = 99999)
+# plot(pro)
+
+pro_vals_RC <- pro_RC$t
+pro_vals_RC <- as.data.frame(pro_vals_RC)
+pro_nonper_RC <- pro_RC$t0
+
+procrustes_dist_plot_RC <- ggplot(data = pro_vals_RC, aes(x = pro_vals_RC)) +
+  geom_histogram(binwidth = 0.01, fill = "dark grey") +
+    geom_vline(xintercept = pro_nonper_RC, lty = 2, color = "red") +
+    labs(x = "Procrustes distribution", y = "Count") +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    theme(legend.position = "none")
+
+ggsave(file="../figures/procrustes_dist_plot_RC.pdf", plot=procrustes_dist_plot_RC, width=4, height=3)
+
+
+df_pro_Y_RC <- data.frame(micro1 = pro_RC$Yrot[,1], micro2 = pro_RC$Yrot[,2])
+df_pro_X_RC <- data.frame(rna1 = pro_RC$X[,1], rna2 = pro_RC$X[,2])
+
+
+procrustes_rna_plot_RC <- ggplot(data = df_pro_X_RC, aes(x = rna1, y = rna2)) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "rna PCOA1 (14.0%)",
+       y = "rna PCOA2 (10.4%)")
+
+ggsave(file="../figures/procrustes_rna_plot_RC.pdf", plot=procrustes_rna_plot_RC, width=3.5, height=3)
+  
+
+procrustes_mic_plot_RC <- ggplot(data = df_pro_Y_RC, aes(x = micro1, y = micro2)) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "micro PCOA1 (8.4%)",
+       y = "micro PCOA2 (7.8%)")
+
+ggsave(file="../figures/procrustes_mic_plot_RC.pdf", plot=procrustes_mic_plot_RC, width=3.5, height=3)
+
+
+procrustes_rna_mic_plot_RC <- ggplot() +
+  geom_point(data = df_pro_X_RC, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y_RC, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_segment(alpha = 0.3, aes(x = df_pro_Y_RC$micro1, y = df_pro_Y_RC$micro2), xend = df_pro_X_RC$rna1, yend = df_pro_X_RC$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
+  lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
+  labs(x = "Dim 1",
+       y = "Dim 2")
+
+ggsave(file="../figures/procrustes_rna_mic_plot_RC.pdf", plot=procrustes_rna_mic_plot_RC, width=4, height=3.5)
+```

@@ -1,0 +1,400 @@
+---
+title: "3.ind_association"
+output: html_document
+date: "2025-12-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 3.1 Individual Association Data Prep
+
+The purpose of this script is to prep data for identifying individual associations between genes and microbes
+
+## load data
+```{r}
+rnaseq_count <- read.csv("../../rnaseq/2.rnaseq_analysis/output/counts_uncorr_fin_woOutlier.csv", header = TRUE, row.names = 1)
+rnaseq_meta <- read.csv("../../rnaseq/2.rnaseq_analysis/output/metadata_fin_woOutlier.csv", header = TRUE, row.names = 1)
+micro_ps <- readRDS("../../microbiome/3.microbiome_analysis/output/phyloseq_sampleReads_unadj.rds")
+
+# protein coding genes
+anno_protein_coding <- read.table("../data/protein_coding.txt", header = TRUE)
+hsa_to_path <- read.csv("../data/hsa_to_path.csv", row.names = 1, header = TRUE)
+pathway_list <- read.csv("../data/pathway_list.csv", header = TRUE)
+PID_path <- read.csv("../data/PID_path_entrez.csv", header = FALSE)
+```
+
+## load packages
+```{r}
+library(phyloseq)
+library(DESeq2)
+library(lme4)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+```
+
+## functions for corrections within region
+```{r}
+correct_rnaseq_data_within_region <- function(rna_transformed_region, rna_metadata) {
+  # filter to protein-coding genes
+  mat_inte_df <- rna_transformed_region[, colnames(rna_transformed_region) %in% anno_protein_coding$symbol]
+
+  # Create an empty matrix for corrected data
+  mat_inte_corr <- matrix(ncol = ncol(mat_inte_df), nrow = nrow(mat_inte_df))
+  colnames(mat_inte_corr) <- colnames(mat_inte_df)
+  rownames(mat_inte_corr) <- rownames(mat_inte_df)
+
+  # Add variables to mat_inte_df
+  mat_inte_df$lpconc <- as.numeric(rna_metadata$p.LibraryConcentration_ngul)
+  mat_inte_df$extractor <- as.factor(rna_metadata$ex.Extractedby)
+  mat_inte_df$sbatch <- as.factor(rna_metadata$s.SequencingBatch)
+  mat_inte_df$RINscore <- as.numeric(rna_metadata$ex.RINscore)
+  mat_inte_df$sex <- as.factor(rna_metadata$i.Sex)
+  mat_inte_df$age <- as.numeric(rna_metadata$i.Age)
+
+  # Set up progress bar
+  total_cols <- ncol(mat_inte_corr)
+  pb <- txtProgressBar(min = 0, max = total_cols, style = 3)
+
+  # Run linear models and store residuals
+  set.seed(123)
+  for(i in seq_along(colnames(mat_inte_corr))){
+    col_name <- colnames(mat_inte_corr)[i]
+    obj <- lm(as.formula(paste0("`", col_name, "`", "~ lpconc + sbatch + RINscore + extractor + sex + age")),  data = mat_inte_df)
+    mat_inte_corr[, col_name] <- resid(obj)
+    
+    # Update progress bar
+    setTxtProgressBar(pb, i)
+  }
+
+  # Close progress bar
+  close(pb)
+  # filter low variance genes
+  mat_inte_corr_t <- t(mat_inte_corr)
+  ## calculate variance for each row
+  gene_variance <- apply(mat_inte_corr_t, 1, var)
+  ## calculate the 25% quantile of variance
+  variance_cutoff <- quantile(gene_variance, 0.25)
+  ## filter to genes above the 25% quantile of variance
+  mat_inte_filt <-  mat_inte_corr_t[gene_variance > variance_cutoff, ]
+  # Convert the corrected matrix to a dataframe
+  mat_inte_filt <- as.data.frame(t(mat_inte_filt))
+
+  return(mat_inte_filt)
+}
+
+
+correct_microbiome_data_within_region <- function(ps) {
+  # Agglomerate taxa at Genus level
+  phy_genus_overlap <- tax_glom(ps, "Genus", NArm = FALSE)
+  phy_genus_overlap_RA <- transform_sample_counts(phy_genus_overlap, function(otu) otu/sum(otu))
+  phy_genus_overlap_RA <- filter_taxa(phy_genus_overlap_RA, function(x) sum(x >= 0.0001) >= (nsamples(ps)/10), TRUE)
+  phy_genus_overlap_filt <- microbiome::transform(phy_genus_overlap_RA, transform = "clr")
+  
+  # Convert OTU table to dataframe
+  otu_table_overlap <- as.data.frame(as.matrix(phy_genus_overlap_filt@otu_table))
+  setDT(otu_table_overlap, keep.rownames = TRUE)[]
+  colnames(otu_table_overlap)[1] <- "SampleID"
+  
+  # Process OTU table
+  otu_table2_overlap <- otu_table_overlap %>% data.frame(check.names=FALSE) %>% set_rownames(.$SampleID)
+  otu_table2_overlap <- otu_table2_overlap[,-1]
+  otu_table2_overlap <- t(otu_table2_overlap)
+  
+  # Get taxonomy table
+  tax_table_overlap <- as.data.frame(as.matrix(phy_genus_overlap_filt@tax_table))
+  
+  # Merge OTU and taxonomy tables
+  otu_tax_overlap <- merge(otu_table2_overlap, tax_table_overlap, by = 0, all = TRUE)
+  
+  # Process taxonomy information
+  otu_tax_overlap$Genus <- replace_na(otu_tax_overlap$Genus, "_unclassified")
+  otu_tax_overlap$Phylum <- ifelse(is.na(otu_tax_overlap$Phylum), otu_tax_overlap$Kingdom, otu_tax_overlap$Phylum)
+  otu_tax_overlap$Class <- ifelse(is.na(otu_tax_overlap$Class), otu_tax_overlap$Phylum, otu_tax_overlap$Class)
+  otu_tax_overlap$Order <- ifelse(is.na(otu_tax_overlap$Order), otu_tax_overlap$Class, otu_tax_overlap$Order)
+  otu_tax_overlap$Family <- ifelse(is.na(otu_tax_overlap$Family), otu_tax_overlap$Order, otu_tax_overlap$Family)
+  otu_tax_overlap$Genus <- ifelse(otu_tax_overlap$Genus == "_unclassified", paste(otu_tax_overlap$Family, otu_tax_overlap$Genus, sep = ""), otu_tax_overlap$Genus)
+  otu_tax_overlap$Genus <- gsub("NA_unclassified", "Unclassified", otu_tax_overlap$Genus)
+  otu_tax_overlap$Family <- ifelse(otu_tax_overlap$Family == "uncultured", paste0("uncultured_", otu_tax_overlap$Order), otu_tax_overlap$Family)
+  otu_tax_overlap$Genus <- ifelse(grepl("uncultured", otu_tax_overlap$Family), otu_tax_overlap$Family, otu_tax_overlap$Genus)
+  otu_tax_overlap$Genus <- ifelse(otu_tax_overlap$Genus == "uncultured", paste0("uncultured_", otu_tax_overlap$Family), otu_tax_overlap$Genus)
+  
+  # Set genus as rownames and remove taxonomic columns
+  rownames(otu_tax_overlap) <- otu_tax_overlap$Genus
+  otu_tax_overlap <- subset(otu_tax_overlap, select = -c(Row.names, Kingdom, Phylum, Class, Order, Family, Genus, Species))
+  otu_tax_overlap <- as.data.frame(t(otu_tax_overlap))
+  
+  # Fix names
+  rownames(otu_tax_overlap) <- phy_genus_overlap@sam_data$UNQ_ID
+  
+  # Prepare for correlation
+  overlap_otu_corr <- matrix(ncol = ncol(otu_tax_overlap), nrow = nrow(otu_tax_overlap))
+  colnames(overlap_otu_corr) <- colnames(otu_tax_overlap)
+  rownames(overlap_otu_corr) <- rownames(otu_tax_overlap)
+  
+  # Get sample data
+  overlap_sam <- as.data.frame(as.matrix(phy_genus_overlap_filt@sam_data))
+  
+  # Add variables
+  otu_tax_overlap$PCRconc <- as.numeric(overlap_sam$p.CleanedPCRConcentration)
+  otu_tax_overlap$exbatch <- as.factor(overlap_sam$ex.ExtractionBatch)
+  otu_tax_overlap$sex <- as.factor(overlap_sam$i.Sex)
+  otu_tax_overlap$age <- as.numeric(overlap_sam$i.Age)
+  
+  # Run linear models with progress bar
+  total_cols <- ncol(overlap_otu_corr)
+  pb <- txtProgressBar(min = 0, max = total_cols, style = 3)
+  
+  set.seed(123)
+  for(i in seq_along(colnames(overlap_otu_corr))){
+    col_name <- colnames(overlap_otu_corr)[i]
+    obj <- lm(as.formula(paste0("`", col_name, "`", "~ PCRconc + exbatch + sex + age")),  data = otu_tax_overlap)
+    overlap_otu_corr[, col_name] <- resid(obj)
+    setTxtProgressBar(pb, i)
+  }
+  
+  close(pb)
+  
+  # Convert to dataframe and return
+  overlap_otu_corr <- as.data.frame(overlap_otu_corr)
+  return(overlap_otu_corr)
+}
+```
+
+## filter samples and adjust order
+```{r}
+micro_overlap_ps <- subset_samples(micro_ps, UNQ_ID != "NA")
+CD_overlap_ps <- subset_samples(micro_overlap_ps, i.Disease == "Crohns")
+
+rnaseq_meta_overlap <- subset(rnaseq_meta, UNQ_ID != "NA")
+rna_meta_CD <- subset(rnaseq_meta_overlap, i.Disease == "Crohns")
+
+## adjust order of rna metadata based on microbiome
+rna_meta_CD_reorder <- rna_meta_CD[order(match(rna_meta_CD$UNQ_ID, CD_overlap_ps@sam_data$UNQ_ID)),]
+
+rna_count_CD <- subset(rnaseq_count, rownames(rnaseq_count) %in% rna_meta_CD_reorder$p.LibraryID)
+
+## adjust order of rna count based on rna metadata
+rna_count_CD_reorder <- rna_count_CD[order(match(rownames(rna_count_CD), rna_meta_CD_reorder$p.LibraryID)),]
+
+rownames(rna_count_CD_reorder) <- rna_meta_CD_reorder$UNQ_ID
+
+rna_count_CD_reorder_t <- t(rna_count_CD_reorder)
+
+## check order
+identical(CD_overlap_ps@sam_data$UNQ_ID, rownames(rna_count_CD_reorder))
+```
+
+## correct data for covariates, including specimen
+```{r}
+# RNAseq
+## checks
+identical(rownames(rna_count_CD_reorder), rna_meta_CD_reorder$UNQ_ID)
+
+## normalize
+set.seed(123)
+dds <- DESeqDataSetFromMatrix(countData = rna_count_CD_reorder_t, colData = rna_meta_CD_reorder, design = ~ 1)
+smallestGroupSize <- ncol(rna_meta_CD)/3
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+dds <- dds[keep,]
+
+set.seed(123)
+vsd <- vst(dds, blind=FALSE)
+mat_inte <- assay(vsd)
+
+## Convert mat_inte to a dataframe and transpose
+mat_inte_df <- as.data.frame(t(mat_inte))
+
+## filter to protein coding genes only
+mat_inte_df <- mat_inte_df[, colnames(mat_inte_df) %in% anno_protein_coding$symbol]
+
+## Create an empty matrix for corrected data
+mat_inte_corr <- matrix(ncol = ncol(mat_inte_df), nrow = nrow(mat_inte_df))
+colnames(mat_inte_corr) <- colnames(mat_inte_df)
+rownames(mat_inte_corr) <- rownames(mat_inte_df)
+
+## Add covariates
+mat_inte_df$lpconc <- as.numeric(rna_meta_CD_reorder$p.LibraryConcentration_ngul)
+mat_inte_df$extractor <- as.factor(rna_meta_CD_reorder$ex.Extractedby)
+mat_inte_df$sbatch <- as.factor(rna_meta_CD_reorder$s.SequencingBatch)
+mat_inte_df$RINscore <- as.numeric(rna_meta_CD_reorder$ex.RINscore)
+mat_inte_df$sex <- as.factor(rna_meta_CD_reorder$i.Sex)
+mat_inte_df$age <- as.numeric(rna_meta_CD_reorder$i.Age)
+mat_inte_df$spec <- as.factor(rna_meta_CD_reorder$i.Specimen)
+mat_inte_df$id <- as.factor(rna_meta_CD_reorder$i.PatientID)
+
+## Run linear models and store residuals
+set.seed(123)
+for(i in colnames(mat_inte_corr)){
+  
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ lpconc + sbatch + RINscore + extractor +
+                                sex + age + spec + (1|id)")),  data = mat_inte_df, 
+              control = lmerControl(optCtrl = list(maxfun = 1000000), 
+                                    check.conv.singular = .makeCC(action = "ignore", tol = formals(isSingular)$tol)))
+  mat_inte_corr[,i] <- resid(obj)
+}
+
+## filter low variance genes
+mat_inte_corr_t <- t(mat_inte_corr)
+## calculate variance for each row
+gene_variance <- apply(mat_inte_corr_t, 1, var)
+## calculate the 25% quantile of variance
+variance_cutoff <- quantile(gene_variance, 0.25)
+## filter to genes above the 25% quantile of variance
+mat_inte_filt <-  mat_inte_corr_t[gene_variance > variance_cutoff, ]
+# Convert the corrected matrix to a dataframe
+rna_corr_ALL <- as.data.frame(t(mat_inte_filt))
+
+
+# microbiome
+## agglomerate to Genus, transform to RA, and then CLR transform
+CD_genus_overlap <- tax_glom(CD_overlap_ps, "Genus", NArm = FALSE)
+CD_genus_overlap_RA <- transform_sample_counts(CD_genus_overlap, function(otu) otu/sum(otu))
+CD_genus_overlap_RA <- filter_taxa(CD_genus_overlap_RA, function(x) sum(x >= 0.0001) >= (nsamples(CD_overlap_ps)/10), TRUE)
+CD_genus_overlap_filt <- microbiome::transform(CD_genus_overlap_RA, transform = "clr")
+  
+## Convert OTU table to dataframe
+CD_otu_table_overlap <- as.data.frame(as.matrix(CD_genus_overlap_filt@otu_table))
+setDT(CD_otu_table_overlap, keep.rownames = TRUE)[]
+colnames(CD_otu_table_overlap)[1] <- "SampleID"
+  
+## fix formatting
+CD_otu_table2_overlap <- CD_otu_table_overlap %>% data.frame(check.names=FALSE) %>% set_rownames(.$SampleID)
+CD_otu_table2_overlap <- CD_otu_table2_overlap[,-1]
+CD_otu_table2_overlap <- t(CD_otu_table2_overlap)
+  
+## Get taxonomy table
+CD_tax_table_overlap <- as.data.frame(as.matrix(CD_genus_overlap_filt@tax_table))
+  
+## Merge OTU and taxonomy tables
+CD_otu_tax_overlap <- merge(CD_otu_table2_overlap, CD_tax_table_overlap, by = 0, all = TRUE)
+  
+## fix taxonomy information
+CD_otu_tax_overlap$Genus <- replace_na(CD_otu_tax_overlap$Genus, "_unclassified")
+CD_otu_tax_overlap$Phylum <- ifelse(is.na(CD_otu_tax_overlap$Phylum), CD_otu_tax_overlap$Kingdom, CD_otu_tax_overlap$Phylum)
+CD_otu_tax_overlap$Class <- ifelse(is.na(CD_otu_tax_overlap$Class), CD_otu_tax_overlap$Phylum, CD_otu_tax_overlap$Class)
+CD_otu_tax_overlap$Order <- ifelse(is.na(CD_otu_tax_overlap$Order), CD_otu_tax_overlap$Class, CD_otu_tax_overlap$Order)
+CD_otu_tax_overlap$Family <- ifelse(is.na(CD_otu_tax_overlap$Family), CD_otu_tax_overlap$Order, CD_otu_tax_overlap$Family)
+CD_otu_tax_overlap$Genus <- ifelse(CD_otu_tax_overlap$Genus == "_unclassified", paste(CD_otu_tax_overlap$Family, CD_otu_tax_overlap$Genus, sep = ""), CD_otu_tax_overlap$Genus)
+CD_otu_tax_overlap$Genus <- gsub("NA_unclassified", "Unclassified", CD_otu_tax_overlap$Genus)
+CD_otu_tax_overlap$Family <- ifelse(CD_otu_tax_overlap$Family == "uncultured", paste0("uncultured_", CD_otu_tax_overlap$Order), CD_otu_tax_overlap$Family)
+CD_otu_tax_overlap$Genus <- ifelse(grepl("uncultured", CD_otu_tax_overlap$Family), CD_otu_tax_overlap$Family, CD_otu_tax_overlap$Genus)
+CD_otu_tax_overlap$Genus <- ifelse(CD_otu_tax_overlap$Genus == "uncultured", paste0("uncultured_", CD_otu_tax_overlap$Family), CD_otu_tax_overlap$Genus)
+  
+## Set genus as rownames and remove taxonomic columns
+rownames(CD_otu_tax_overlap) <- CD_otu_tax_overlap$Genus
+CD_otu_tax_overlap <- subset(CD_otu_tax_overlap, select = -c(Row.names, Kingdom, Phylum, Class, Order, Family, Genus, Species))
+CD_otu_tax_overlap <- as.data.frame(t(CD_otu_tax_overlap))
+  
+## Fix names
+rownames(CD_otu_tax_overlap) <- CD_genus_overlap_filt@sam_data$UNQ_ID
+  
+## Prepare for correlation
+CD_overlap_otu_corr <- matrix(ncol = ncol(CD_otu_tax_overlap), nrow = nrow(CD_otu_tax_overlap))
+colnames(CD_overlap_otu_corr) <- colnames(CD_otu_tax_overlap)
+rownames(CD_overlap_otu_corr) <- rownames(CD_otu_tax_overlap)
+  
+## Get sample data
+CD_overlap_sam <- as.data.frame(as.matrix(CD_genus_overlap_filt@sam_data))
+  
+## Add variables
+CD_otu_tax_overlap$PCRconc <- as.numeric(CD_overlap_sam$p.CleanedPCRConcentration)
+CD_otu_tax_overlap$exbatch <- as.factor(CD_overlap_sam$ex.ExtractionBatch)
+CD_otu_tax_overlap$sex <- as.factor(CD_overlap_sam$i.Sex)
+CD_otu_tax_overlap$age <- as.numeric(CD_overlap_sam$i.Age)
+CD_otu_tax_overlap$id <- as.factor(CD_overlap_sam$i.PatientID)
+CD_otu_tax_overlap$spec <- as.factor(CD_overlap_sam$i.Specimen)
+  
+## Run linear models
+set.seed(123)
+for(i in colnames(CD_overlap_otu_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ PCRconc + exbatch + sex + age + spec + (1|id)")),  
+              data = CD_otu_tax_overlap, control = lmerControl(optCtrl = list(maxfun = 1000000), 
+                                    check.conv.singular = .makeCC(action = "ignore", tol =
+                                                                    formals(isSingular)$tol)))
+  CD_overlap_otu_corr[,i] <- resid(obj)
+}
+
+## Convert to dataframe
+CD_overlap_otu_corr <- as.data.frame(CD_overlap_otu_corr)
+
+## checks
+identical(rownames(CD_overlap_otu_corr), rownames(rna_corr_ALL))
+```
+
+## save intestine-wide individual datasets
+```{r}
+write.csv(CD_overlap_otu_corr, "../output/micro_indiv_corrected.csv")
+write.csv(rna_corr_ALL, "../output/rna_indiv_corrected.csv")
+```
+
+## filter data by region
+```{r}
+rna_meta_TI <- subset(rna_meta_CD_reorder, i.Specimen == "Terminal Ileum")
+rna_meta_C <- subset(rna_meta_CD_reorder, i.Specimen == "Cecum")
+rna_meta_RC <- subset(rna_meta_CD_reorder, i.Specimen == "Right Colon")
+
+micro_TI_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Terminal Ileum")
+micro_C_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Cecum")
+micro_RC_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Right Colon")
+```
+
+## transform RNAseq data by region
+```{r}
+set.seed(123)
+dds_full_spec <- DESeqDataSetFromMatrix(countData = rna_count_CD_reorder_t, colData = rna_meta_CD_reorder, design = ~ i.Specimen)
+
+smallestGroupSize_spec <- 30
+keep_spec <- rowSums(counts(dds_full_spec) >= 10) >= smallestGroupSize_spec
+dds_full_spec <- dds_full_spec[keep_spec,]
+set.seed(123)
+vsd_spec <- vst(dds_full_spec, blind=FALSE)
+mat_spec <- assay(vsd_spec)
+
+mat_spec <- as.data.frame(t(mat_spec))
+
+mat_TI <- mat_spec[rownames(mat_spec) %in% rna_meta_TI$UNQ_ID,]
+mat_C <- mat_spec[rownames(mat_spec) %in% rna_meta_C$UNQ_ID,]
+mat_RC <- mat_spec[rownames(mat_spec) %in% rna_meta_RC$UNQ_ID,]
+```
+
+## correct regional datasets
+```{r}
+# checks
+identical(rownames(mat_TI), rna_meta_TI$UNQ_ID)
+identical(rownames(mat_C), rna_meta_C$UNQ_ID)
+identical(rownames(mat_RC), rna_meta_RC$UNQ_ID)
+
+# correct data
+set.seed(123)
+rna_corr_TI <- correct_rnaseq_data_within_region(mat_TI, rna_meta_TI)
+set.seed(123)
+rna_corr_C <- correct_rnaseq_data_within_region(mat_C, rna_meta_C)
+set.seed(123)
+rna_corr_RC <- correct_rnaseq_data_within_region(mat_RC, rna_meta_RC)
+set.seed(123)
+micro_corr_TI <- correct_microbiome_data_within_region(micro_TI_ps)
+set.seed(123)
+micro_corr_C <- correct_microbiome_data_within_region(micro_C_ps)
+set.seed(123)
+micro_corr_RC <- correct_microbiome_data_within_region(micro_RC_ps)
+
+# check
+identical(rownames(rna_corr_TI), rownames(micro_corr_TI))
+identical(rownames(rna_corr_C), rownames(micro_corr_C))
+identical(rownames(rna_corr_RC), rownames(micro_corr_RC))
+```
+
+## save regional individual datasets
+```{r}
+write.csv(rna_corr_TI, "../output/rna_indiv_corrected_TI.csv")
+write.csv(micro_corr_TI, "../output/micro_indiv_corrected_TI.csv")
+write.csv(rna_corr_C, "../output/rna_indiv_corrected_C.csv")
+write.csv(micro_corr_C, "../output/micro_indiv_corrected_C.csv")
+write.csv(rna_corr_RC, "../output/rna_indiv_corrected_RC.csv")
+write.csv(micro_corr_RC, "../output/micro_indiv_corrected_RC.csv")
+```
+

@@ -1,0 +1,1146 @@
+---
+title: "2.group_association"
+output: html_document
+date: "2025-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 2. Group Association
+
+The purpose of this script is to analyze the group-level association between co-expressed genes and co-abundant microbes
+
+## load data
+```{r}
+rnaseq_count <- read.csv("../../rnaseq/2.rnaseq_analysis/output/counts_uncorr_fin_woOutlier.csv", header = TRUE, row.names = 1)
+rnaseq_meta <- read.csv("../../rnaseq/2.rnaseq_analysis/output/metadata_fin_woOutlier.csv", header = TRUE, row.names = 1)
+micro_ps <- readRDS("../../microbiome/3.microbiome_analysis/output/phyloseq_sampleReads_unadj.rds")
+
+# protein coding genes
+anno_protein_coding <- read.table("../data/protein_coding.txt", header = TRUE)
+hsa_to_path <- read.csv("../data/hsa_to_path.csv", row.names = 1, header = TRUE)
+pathway_list <- read.csv("../data/pathway_list.csv", header = TRUE)
+PID_path <- read.csv("../data/PID_path_entrez.csv", header = FALSE)
+```
+
+## load packages
+```{r}
+library(phyloseq)
+library(PMA)
+library(DESeq2)
+library(lme4)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(ggplot2)
+library(clusterProfiler)
+```
+
+## sparseCCA functions
+```{r}
+## this code is modified from Priya et al: https://github.com/blekhmanlab/host_gene_microbiome_interactions/tree/main/Tutorial/sparseCCA_tutorial
+tune_params_grid_search <- function( X, Y){
+  scoreXcv <- c()
+  scoreYcv <- c()
+  penaltyX <- seq(0.15,0.4,length=10)
+  penaltyY <- seq(0.1,0.4,length=10)
+  corr_demo <- matrix(nrow = length(penaltyX), ncol =  length(penaltyY))
+  num_samples <- nrow(X)
+  start_time <- Sys.time()
+  for( i in 1:length(penaltyX)){
+    for(j in 1:length(penaltyY)){
+      # print(paste0("Index: i = ",i,", j =", j)); flush.console()
+      for(k in 1:num_samples){
+       
+        print(paste0("Index: i = ",i,", j =", j," k = ",k)); flush.console()
+        #compute weights with sample k held out:
+        #Default niter = 15 edited to 5 to speed this up.
+        res <- PMA::CCA(X[-k,],Y[-k,], penaltyx = penaltyX[i], penaltyz = penaltyY[j], K=1, niter = 5, trace = F, standardize = T, typex = c("standard"), typez = c("standard"))
+        ## Compute scores for k'th sample for first pair of canonical variables
+        ## Take weight of features (res$u and res$v) computed using all except 
+        ## the kth sample and multiple it by values for the kth sample in the 
+        ## feature matrix X and Y.
+        scoreXcv[k] <- X[k,]%*%res$u ## single value
+        scoreYcv[k] <- Y[k,]%*%res$v ## single value
+      }
+      ## correlation between scores for X and Y for all held out samples.
+      corr_demo[i,j] = cor(scoreXcv,scoreYcv) 
+    }
+  }
+  end_time <- Sys.time()
+  time_elapsed <- end_time - start_time
+  print(paste0("Time elapsed for param tuning = ", time_elapsed)); flush.console()
+  
+  row.names(corr_demo) <- as.character(penaltyX)
+  colnames(corr_demo) <- as.character(penaltyY)
+  
+  corr_demo_df <- as.data.frame(corr_demo)
+  rownames(corr_demo_df)
+  colnames(corr_demo_df)
+  
+  ##identify best penalty parameters
+  # find index with max absolute corr
+  bestpenalty <- which(abs(corr_demo) == max(abs(corr_demo)), arr.ind = TRUE)
+  bestpenalty
+  bestpenaltyX <- penaltyX[bestpenalty[1]]
+  bestpenaltyY <- penaltyY[bestpenalty[2]]
+  
+  return (c(bestpenaltyX,bestpenaltyY))
+}
+
+run_sparseCCA <- function(X, Z, CCA.K, penaltyX, penaltyZ, vInit=NULL, outputFile=NULL){
+  CCA.out <-  PMA::CCA(X,Z,typex="standard",typez="standard",K=CCA.K,
+                  penaltyx=penaltyX,penaltyz=penaltyZ,
+                  v=vInit)
+  if(!is.null(outputFile)){
+    sink(outputFile)
+    print(CCA.out)
+    sink()
+  }
+  
+  ## add rownames to output factors
+  rownames(CCA.out$u) <- colnames(X)
+  rownames(CCA.out$v) <- colnames(Z)
+  ## compute contribution of selected features to each of the samples.
+  CCA_var_genes <- X %*% CCA.out$u ## canonical variance for genes 
+  CCA_var_microbes <- Z %*% CCA.out$v ## canonical variance for microbes
+  
+  return(list(CCA.out, CCA_var_genes, CCA_var_microbes))
+  
+}
+
+get_avg_features <- function(cca_cov, CCA.K){
+  num_features <- 0
+  for(k in 1:CCA.K){
+    num_features <- num_features + length(which(cca_cov[,k]!=0))
+  }
+  avg_features <- num_features/CCA.K
+}
+
+test_significance_LOOCV <- function(X, Y, bestpenaltyX, bestpenaltyY, num_components){
+  cca.k = num_components
+  scoresXcv <- matrix(nrow = nrow(X), ncol = cca.k)
+  scoresYcv <-  matrix(nrow = nrow(Y), ncol = cca.k)
+  corr_pval <- c()
+  corr_r <- c()
+  for(i in 1:nrow(X)){ #n = no. of samples
+    #compute weights with sample i held out:
+    res <- PMA::CCA(X[-i,],Y[-i,], penaltyx=bestpenaltyX, penaltyz=bestpenaltyY, K=cca.k, trace = F, typex = c("standard"), typez = c("standard")) ## default niter = 15 which is spit out when trace = T (default)
+    ###compute scores for i'th sample for each component (pair of canonical variables)
+    for(j in 1:cca.k){
+      #print(paste0("i = ", i," K = ", j)); flush.console()
+      scoresXcv[i,j] <- X[i,]%*%res$u[,j]
+      scoresYcv[i,j] <- Y[i,]%*%res$v[,j]
+    }
+  }
+  ## Test for each components
+  for(j in 1:cca.k){
+    corr <- cor.test(scoresXcv[,j],scoresYcv[,j]) ## Pearson correlation.
+    corr_pval[j] <- corr$p.value
+  }
+  corr_pval
+}
+
+save_CCA_components <- function(CCA.out, CCA.K, dirname){
+  ## Print canonical covariates in files 
+  for(i in CCA.K){
+    print(paste0("Writing significant component = ", i))
+    selected_X <- which(CCA.out$u[,i]!=0) 
+    selected_X <- rownames(CCA.out$u)[selected_X]
+    coeff_X <- unname(CCA.out$u[selected_X,i])
+    selected_Z <- which(CCA.out$v[,i]!=0)
+    selected_Z <- rownames(CCA.out$v)[selected_Z]
+    coeff_Z <- unname(CCA.out$v[selected_Z,i])
+    ## Make all vectors of same length to avoid repetition of elements from shorter vectors.
+    n <- max(length(selected_X), length(selected_Z))
+    length(selected_X) <- n                      
+    length(selected_Z) <- n
+    length(coeff_X) <- n
+    length(coeff_Z) <- n
+    selected_XZ <- as.data.frame(cbind(gene = selected_X, gene_coeff = coeff_X,
+                                       taxa = selected_Z, taxa_coeff = coeff_Z))
+    write.table(selected_XZ, file=paste0(dirname,"gene_taxa_component_",i,".txt"), sep = "\t", col.names = NA)
+  }
+  
+}
+
+```
+
+## functions for corrections within region
+```{r}
+correct_rnaseq_data_within_region <- function(rna_transformed_region, rna_metadata) {
+  # filter to protein-coding genes
+  mat_inte_df <- rna_transformed_region[, colnames(rna_transformed_region) %in% anno_protein_coding$symbol]
+
+  # Create an empty matrix for corrected data
+  mat_inte_corr <- matrix(ncol = ncol(mat_inte_df), nrow = nrow(mat_inte_df))
+  colnames(mat_inte_corr) <- colnames(mat_inte_df)
+  rownames(mat_inte_corr) <- rownames(mat_inte_df)
+
+  # Add variables to mat_inte_df
+  mat_inte_df$lpconc <- as.numeric(rna_metadata$p.LibraryConcentration_ngul)
+  mat_inte_df$extractor <- as.factor(rna_metadata$ex.Extractedby)
+  mat_inte_df$sbatch <- as.factor(rna_metadata$s.SequencingBatch)
+  mat_inte_df$RINscore <- as.numeric(rna_metadata$ex.RINscore)
+  mat_inte_df$sex <- as.factor(rna_metadata$i.Sex)
+  mat_inte_df$age <- as.numeric(rna_metadata$i.Age)
+
+  # Set up progress bar
+  total_cols <- ncol(mat_inte_corr)
+  pb <- txtProgressBar(min = 0, max = total_cols, style = 3)
+
+  # Run linear models and store residuals
+  set.seed(123)
+  for(i in seq_along(colnames(mat_inte_corr))){
+    col_name <- colnames(mat_inte_corr)[i]
+    obj <- lm(as.formula(paste0("`", col_name, "`", "~ lpconc + sbatch + RINscore + extractor + sex + age")),  data = mat_inte_df)
+    mat_inte_corr[, col_name] <- resid(obj)
+    
+    # Update progress bar
+    setTxtProgressBar(pb, i)
+  }
+
+  # Close progress bar
+  close(pb)
+  # filter low variance genes
+  mat_inte_corr_t <- t(mat_inte_corr)
+  ## calculate variance for each row
+  gene_variance <- apply(mat_inte_corr_t, 1, var)
+  ## calculate the 25% quantile of variance
+  variance_cutoff <- quantile(gene_variance, 0.25)
+  ## filter to genes above the 25% quantile of variance
+  mat_inte_filt <-  mat_inte_corr_t[gene_variance > variance_cutoff, ]
+  # Convert the corrected matrix to a dataframe
+  mat_inte_filt <- as.data.frame(t(mat_inte_filt))
+
+  return(mat_inte_filt)
+}
+
+
+correct_microbiome_data_within_region <- function(ps) {
+  # Agglomerate taxa at Genus level
+  phy_genus_overlap <- tax_glom(ps, "Genus", NArm = FALSE)
+  phy_genus_overlap_RA <- transform_sample_counts(phy_genus_overlap, function(otu) otu/sum(otu))
+  phy_genus_overlap_RA <- filter_taxa(phy_genus_overlap_RA, function(x) sum(x >= 0.0001) >= (nsamples(ps)/10), TRUE)
+  phy_genus_overlap_filt <- microbiome::transform(phy_genus_overlap_RA, transform = "clr")
+  
+  # Convert OTU table to dataframe
+  otu_table_overlap <- as.data.frame(as.matrix(phy_genus_overlap_filt@otu_table))
+  setDT(otu_table_overlap, keep.rownames = TRUE)[]
+  colnames(otu_table_overlap)[1] <- "SampleID"
+  
+  # Process OTU table
+  otu_table2_overlap <- otu_table_overlap %>% data.frame(check.names=FALSE) %>% set_rownames(.$SampleID)
+  otu_table2_overlap <- otu_table2_overlap[,-1]
+  otu_table2_overlap <- t(otu_table2_overlap)
+  
+  # Get taxonomy table
+  tax_table_overlap <- as.data.frame(as.matrix(phy_genus_overlap_filt@tax_table))
+  
+  # Merge OTU and taxonomy tables
+  otu_tax_overlap <- merge(otu_table2_overlap, tax_table_overlap, by = 0, all = TRUE)
+  
+  # Process taxonomy information
+  otu_tax_overlap$Genus <- replace_na(otu_tax_overlap$Genus, "_unclassified")
+  otu_tax_overlap$Phylum <- ifelse(is.na(otu_tax_overlap$Phylum), otu_tax_overlap$Kingdom, otu_tax_overlap$Phylum)
+  otu_tax_overlap$Class <- ifelse(is.na(otu_tax_overlap$Class), otu_tax_overlap$Phylum, otu_tax_overlap$Class)
+  otu_tax_overlap$Order <- ifelse(is.na(otu_tax_overlap$Order), otu_tax_overlap$Class, otu_tax_overlap$Order)
+  otu_tax_overlap$Family <- ifelse(is.na(otu_tax_overlap$Family), otu_tax_overlap$Order, otu_tax_overlap$Family)
+  otu_tax_overlap$Genus <- ifelse(otu_tax_overlap$Genus == "_unclassified", paste(otu_tax_overlap$Family, otu_tax_overlap$Genus, sep = ""), otu_tax_overlap$Genus)
+  otu_tax_overlap$Genus <- gsub("NA_unclassified", "Unclassified", otu_tax_overlap$Genus)
+  otu_tax_overlap$Family <- ifelse(otu_tax_overlap$Family == "uncultured", paste0("uncultured_", otu_tax_overlap$Order), otu_tax_overlap$Family)
+  otu_tax_overlap$Genus <- ifelse(grepl("uncultured", otu_tax_overlap$Family), otu_tax_overlap$Family, otu_tax_overlap$Genus)
+  otu_tax_overlap$Genus <- ifelse(otu_tax_overlap$Genus == "uncultured", paste0("uncultured_", otu_tax_overlap$Family), otu_tax_overlap$Genus)
+  
+  # Set genus as rownames and remove taxonomic columns
+  rownames(otu_tax_overlap) <- otu_tax_overlap$Genus
+  otu_tax_overlap <- subset(otu_tax_overlap, select = -c(Row.names, Kingdom, Phylum, Class, Order, Family, Genus, Species))
+  otu_tax_overlap <- as.data.frame(t(otu_tax_overlap))
+  
+  # Fix names
+  rownames(otu_tax_overlap) <- phy_genus_overlap@sam_data$UNQ_ID
+  
+  # Prepare for correlation
+  overlap_otu_corr <- matrix(ncol = ncol(otu_tax_overlap), nrow = nrow(otu_tax_overlap))
+  colnames(overlap_otu_corr) <- colnames(otu_tax_overlap)
+  rownames(overlap_otu_corr) <- rownames(otu_tax_overlap)
+  
+  # Get sample data
+  overlap_sam <- as.data.frame(as.matrix(phy_genus_overlap_filt@sam_data))
+  
+  # Add variables
+  otu_tax_overlap$PCRconc <- as.numeric(overlap_sam$p.CleanedPCRConcentration)
+  otu_tax_overlap$exbatch <- as.factor(overlap_sam$ex.ExtractionBatch)
+  otu_tax_overlap$sex <- as.factor(overlap_sam$i.Sex)
+  otu_tax_overlap$age <- as.numeric(overlap_sam$i.Age)
+  
+  # Run linear models with progress bar
+  total_cols <- ncol(overlap_otu_corr)
+  pb <- txtProgressBar(min = 0, max = total_cols, style = 3)
+  
+  set.seed(123)
+  for(i in seq_along(colnames(overlap_otu_corr))){
+    col_name <- colnames(overlap_otu_corr)[i]
+    obj <- lm(as.formula(paste0("`", col_name, "`", "~ PCRconc + exbatch + sex + age")),  data = otu_tax_overlap)
+    overlap_otu_corr[, col_name] <- resid(obj)
+    setTxtProgressBar(pb, i)
+  }
+  
+  close(pb)
+  
+  # Convert to dataframe and return
+  overlap_otu_corr <- as.data.frame(overlap_otu_corr)
+  return(overlap_otu_corr)
+}
+```
+
+## filter samples and adjust order
+```{r}
+micro_overlap_ps <- subset_samples(micro_ps, UNQ_ID != "NA")
+CD_overlap_ps <- subset_samples(micro_overlap_ps, i.Disease == "Crohns")
+
+rnaseq_meta_overlap <- subset(rnaseq_meta, UNQ_ID != "NA")
+rna_meta_CD <- subset(rnaseq_meta_overlap, i.Disease == "Crohns")
+
+## adjust order of rna metadata based on microbiome
+rna_meta_CD_reorder <- rna_meta_CD[order(match(rna_meta_CD$UNQ_ID, CD_overlap_ps@sam_data$UNQ_ID)),]
+
+rna_count_CD <- subset(rnaseq_count, rownames(rnaseq_count) %in% rna_meta_CD_reorder$p.LibraryID)
+
+## adjust order of rna count based on rna metadata
+rna_count_CD_reorder <- rna_count_CD[order(match(rownames(rna_count_CD), rna_meta_CD_reorder$p.LibraryID)),]
+
+rownames(rna_count_CD_reorder) <- rna_meta_CD_reorder$UNQ_ID
+
+rna_count_CD_reorder_t <- t(rna_count_CD_reorder)
+
+## check order
+identical(CD_overlap_ps@sam_data$UNQ_ID, rownames(rna_count_CD_reorder))
+```
+
+## correct data for covariates, including specimen
+```{r}
+# RNAseq
+## checks
+identical(rownames(rna_count_CD_reorder), rna_meta_CD_reorder$UNQ_ID)
+
+## normalize
+set.seed(123)
+dds <- DESeqDataSetFromMatrix(countData = rna_count_CD_reorder_t, colData = rna_meta_CD_reorder, design = ~ 1)
+smallestGroupSize <- ncol(rna_meta_CD)/3
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+dds <- dds[keep,]
+
+set.seed(123)
+vsd <- vst(dds, blind=FALSE)
+mat_inte <- assay(vsd)
+
+## Convert mat_inte to a dataframe and transpose
+mat_inte_df <- as.data.frame(t(mat_inte))
+
+## filter to protein coding genes only
+mat_inte_df <- mat_inte_df[, colnames(mat_inte_df) %in% anno_protein_coding$symbol]
+
+## Create an empty matrix for corrected data
+mat_inte_corr <- matrix(ncol = ncol(mat_inte_df), nrow = nrow(mat_inte_df))
+colnames(mat_inte_corr) <- colnames(mat_inte_df)
+rownames(mat_inte_corr) <- rownames(mat_inte_df)
+
+## Add covariates
+mat_inte_df$lpconc <- as.numeric(rna_meta_CD_reorder$p.LibraryConcentration_ngul)
+mat_inte_df$extractor <- as.factor(rna_meta_CD_reorder$ex.Extractedby)
+mat_inte_df$sbatch <- as.factor(rna_meta_CD_reorder$s.SequencingBatch)
+mat_inte_df$RINscore <- as.numeric(rna_meta_CD_reorder$ex.RINscore)
+mat_inte_df$sex <- as.factor(rna_meta_CD_reorder$i.Sex)
+mat_inte_df$age <- as.numeric(rna_meta_CD_reorder$i.Age)
+mat_inte_df$spec <- as.factor(rna_meta_CD_reorder$i.Specimen)
+mat_inte_df$id <- as.factor(rna_meta_CD_reorder$i.PatientID)
+
+## Run linear models and store residuals
+set.seed(123)
+for(i in colnames(mat_inte_corr)){
+  
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ lpconc + sbatch + RINscore + extractor +
+                                sex + age + spec + (1|id)")),  data = mat_inte_df, 
+              control = lmerControl(optCtrl = list(maxfun = 1000000), 
+                                    check.conv.singular = .makeCC(action = "ignore", tol = formals(isSingular)$tol)))
+  mat_inte_corr[,i] <- resid(obj)
+}
+
+## filter low variance genes
+mat_inte_corr_t <- t(mat_inte_corr)
+## calculate variance for each row
+gene_variance <- apply(mat_inte_corr_t, 1, var)
+## calculate the 25% quantile of variance
+variance_cutoff <- quantile(gene_variance, 0.25)
+## filter to genes above the 25% quantile of variance
+mat_inte_filt <-  mat_inte_corr_t[gene_variance > variance_cutoff, ]
+# Convert the corrected matrix to a dataframe
+rna_corr_ALL <- as.data.frame(t(mat_inte_filt))
+
+
+# microbiome
+## agglomerate to Genus, transform to RA, and then CLR transform
+CD_genus_overlap <- tax_glom(CD_overlap_ps, "Genus", NArm = FALSE)
+CD_genus_overlap_RA <- transform_sample_counts(CD_genus_overlap, function(otu) otu/sum(otu))
+CD_genus_overlap_RA <- filter_taxa(CD_genus_overlap_RA, function(x) sum(x >= 0.0001) >= (nsamples(CD_overlap_ps)/10), TRUE)
+CD_genus_overlap_filt <- microbiome::transform(CD_genus_overlap_RA, transform = "clr")
+  
+## Convert OTU table to dataframe
+CD_otu_table_overlap <- as.data.frame(as.matrix(CD_genus_overlap_filt@otu_table))
+setDT(CD_otu_table_overlap, keep.rownames = TRUE)[]
+colnames(CD_otu_table_overlap)[1] <- "SampleID"
+  
+## fix formatting
+CD_otu_table2_overlap <- CD_otu_table_overlap %>% data.frame(check.names=FALSE) %>% set_rownames(.$SampleID)
+CD_otu_table2_overlap <- CD_otu_table2_overlap[,-1]
+CD_otu_table2_overlap <- t(CD_otu_table2_overlap)
+  
+## Get taxonomy table
+CD_tax_table_overlap <- as.data.frame(as.matrix(CD_genus_overlap_filt@tax_table))
+  
+## Merge OTU and taxonomy tables
+CD_otu_tax_overlap <- merge(CD_otu_table2_overlap, CD_tax_table_overlap, by = 0, all = TRUE)
+  
+## fix taxonomy information
+CD_otu_tax_overlap$Genus <- replace_na(CD_otu_tax_overlap$Genus, "_unclassified")
+CD_otu_tax_overlap$Phylum <- ifelse(is.na(CD_otu_tax_overlap$Phylum), CD_otu_tax_overlap$Kingdom, CD_otu_tax_overlap$Phylum)
+CD_otu_tax_overlap$Class <- ifelse(is.na(CD_otu_tax_overlap$Class), CD_otu_tax_overlap$Phylum, CD_otu_tax_overlap$Class)
+CD_otu_tax_overlap$Order <- ifelse(is.na(CD_otu_tax_overlap$Order), CD_otu_tax_overlap$Class, CD_otu_tax_overlap$Order)
+CD_otu_tax_overlap$Family <- ifelse(is.na(CD_otu_tax_overlap$Family), CD_otu_tax_overlap$Order, CD_otu_tax_overlap$Family)
+CD_otu_tax_overlap$Genus <- ifelse(CD_otu_tax_overlap$Genus == "_unclassified", paste(CD_otu_tax_overlap$Family, CD_otu_tax_overlap$Genus, sep = ""), CD_otu_tax_overlap$Genus)
+CD_otu_tax_overlap$Genus <- gsub("NA_unclassified", "Unclassified", CD_otu_tax_overlap$Genus)
+CD_otu_tax_overlap$Family <- ifelse(CD_otu_tax_overlap$Family == "uncultured", paste0("uncultured_", CD_otu_tax_overlap$Order), CD_otu_tax_overlap$Family)
+CD_otu_tax_overlap$Genus <- ifelse(grepl("uncultured", CD_otu_tax_overlap$Family), CD_otu_tax_overlap$Family, CD_otu_tax_overlap$Genus)
+CD_otu_tax_overlap$Genus <- ifelse(CD_otu_tax_overlap$Genus == "uncultured", paste0("uncultured_", CD_otu_tax_overlap$Family), CD_otu_tax_overlap$Genus)
+  
+## Set genus as rownames and remove taxonomic columns
+rownames(CD_otu_tax_overlap) <- CD_otu_tax_overlap$Genus
+CD_otu_tax_overlap <- subset(CD_otu_tax_overlap, select = -c(Row.names, Kingdom, Phylum, Class, Order, Family, Genus, Species))
+CD_otu_tax_overlap <- as.data.frame(t(CD_otu_tax_overlap))
+  
+## Fix names
+rownames(CD_otu_tax_overlap) <- CD_genus_overlap_filt@sam_data$UNQ_ID
+  
+## Prepare for correlation
+CD_overlap_otu_corr <- matrix(ncol = ncol(CD_otu_tax_overlap), nrow = nrow(CD_otu_tax_overlap))
+colnames(CD_overlap_otu_corr) <- colnames(CD_otu_tax_overlap)
+rownames(CD_overlap_otu_corr) <- rownames(CD_otu_tax_overlap)
+  
+## Get sample data
+CD_overlap_sam <- as.data.frame(as.matrix(CD_genus_overlap_filt@sam_data))
+  
+## Add variables
+CD_otu_tax_overlap$PCRconc <- as.numeric(CD_overlap_sam$p.CleanedPCRConcentration)
+CD_otu_tax_overlap$exbatch <- as.factor(CD_overlap_sam$ex.ExtractionBatch)
+CD_otu_tax_overlap$sex <- as.factor(CD_overlap_sam$i.Sex)
+CD_otu_tax_overlap$age <- as.numeric(CD_overlap_sam$i.Age)
+CD_otu_tax_overlap$id <- as.factor(CD_overlap_sam$i.PatientID)
+CD_otu_tax_overlap$spec <- as.factor(CD_overlap_sam$i.Specimen)
+  
+## Run linear models
+set.seed(123)
+for(i in colnames(CD_overlap_otu_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ PCRconc + exbatch + sex + age + spec + (1|id)")),  
+              data = CD_otu_tax_overlap, control = lmerControl(optCtrl = list(maxfun = 1000000), 
+                                    check.conv.singular = .makeCC(action = "ignore", tol =
+                                                                    formals(isSingular)$tol)))
+  CD_overlap_otu_corr[,i] <- resid(obj)
+}
+
+## Convert to dataframe
+CD_overlap_otu_corr <- as.data.frame(CD_overlap_otu_corr)
+
+## checks
+identical(rownames(CD_overlap_otu_corr), rownames(rna_corr_ALL))
+```
+
+## format data in prep for sparse-CCA
+```{r}
+rna_corr_mat <- as.matrix(rna_corr_ALL)
+micro_corr_mat <- as.matrix(CD_overlap_otu_corr)
+```
+
+## run sparse CCA
+```{r}
+current_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+
+##### what is the reasoning for this value?
+cca.k = 10
+
+set.seed(123)
+bestPenalty <- tune_params_grid_search(rna_corr_mat, micro_corr_mat)
+bestpenaltyX <- bestPenalty[1]
+bestpenaltyY <- bestPenalty[2]
+
+set.seed(123)
+cca <- run_sparseCCA(rna_corr_mat, micro_corr_mat, cca.k, bestpenaltyX, 
+                            bestpenaltyY, outputFile = paste0(current_dir, "/../output/CCA_output_",
+                                                                     bestpenaltyX, "_" , 
+                                                                     bestpenaltyY, ".txt"))
+
+## average number of genes and microbes in resulting components
+avg_genes <- get_avg_features(cca[[1]]$u, cca.k)
+avg_genes
+
+avg.microbes <- get_avg_features(cca[[1]]$v, cca.k)
+avg.microbes
+
+
+## check significance
+CCA_pval <- test_significance_LOOCV(rna_corr_mat, micro_corr_mat, bestpenaltyX, bestpenaltyY, cca.k)
+
+length(which(CCA_pval < 0.1))
+which(CCA_pval < 0.1)
+
+CCA_padj <- p.adjust(CCA_pval, method = "BH")
+CCA_padj
+
+length(which(CCA_padj < 0.1))
+which(CCA_padj < 0.1)
+
+## save values
+CCA_sig <- cbind(CCA_pval, CCA_padj)
+
+rownames(CCA_sig) <- paste0("comp_", 1:10)
+
+# write.csv(CCA_sig, "../output/CCA_sig.csv")
+```
+
+## plot components
+```{r}
+rna_comp <- as.data.frame(cca[[2]])
+micro_comp <- as.data.frame(cca[[3]])
+
+colnames(rna_comp) <- sprintf("Comp%02d", 1:10)
+rna_comp$sample <- rownames(rna_comp)
+
+rna_comp <- pivot_longer(rna_comp, cols = !sample, names_to = "component", values_to = "rna")
+
+colnames(micro_comp) <- sprintf("Comp%02d", 1:10)
+micro_comp$sample <- rownames(micro_comp)
+
+micro_comp <- pivot_longer(micro_comp, cols = !sample, names_to = "component", values_to = "micro")
+
+df_comp <- cbind(rna_comp, micro_comp$micro)
+df_comp <- as.data.frame(df_comp)
+colnames(df_comp) <- c("sample", "component", "rna", "microbe")
+
+
+sparseCCA_intestine <- ggplot(df_comp, aes(x = rna, y = microbe), color = black) +
+  geom_point() +
+  geom_smooth(method='lm', formula= y~x) +
+  facet_wrap(~component, scales = "free", , ncol = 5) +
+  labs(x = "RNA canonical variate", y = "Microbe canonical variate")
+
+ggsave("../figures/sparseCCA_intestine.pdf", sparseCCA_intestine, width = 20, height = 7)
+```
+
+## save components
+```{r}
+sig_cutoff <- 0.1
+sig <- which(CCA_pval < sig_cutoff)
+dirname <- paste0(current_dir,"/../output/ALL_REGION")
+save_CCA_components(cca[[1]],sig,dirname)
+getwd()
+
+saveRDS(cca, file = "../output/ALL_REGION_cca.RDS")
+```
+
+## extract significant components and switch to entrez IDs
+```{r}
+comp1 <- cca[[1]][["u"]][,1]
+comp1 <- as.data.frame(comp1)
+comp1 <- filter(comp1, comp1 != 0)
+comp1 <- rownames(comp1)
+
+comp2 <- cca[[1]][["u"]][,2]
+comp2 <- as.data.frame(comp2)
+comp2 <- filter(comp2, comp2 != 0)
+comp2 <- rownames(comp2)
+
+comp3 <- cca[[1]][["u"]][,3]
+comp3 <- as.data.frame(comp3)
+comp3 <- filter(comp3, comp3 != 0)
+comp3 <- rownames(comp3)
+
+comp4 <- cca[[1]][["u"]][,4]
+comp4 <- as.data.frame(comp4)
+comp4 <- filter(comp4, comp4 != 0)
+comp4 <- rownames(comp4)
+
+comp6 <- cca[[1]][["u"]][,6]
+comp6 <- as.data.frame(comp6)
+comp6 <- filter(comp6, comp6 != 0)
+comp6 <- rownames(comp6)
+
+comp10 <- cca[[1]][["u"]][,10]
+comp10 <- as.data.frame(comp10)
+comp10 <- filter(comp10, comp10 != 0)
+comp10 <- rownames(comp10)
+
+# universe
+all_entrez <- colnames(rna_corr_mat)
+
+# entrez ID
+comp1_entrez <- as.character(anno_protein_coding$entrezID[match(comp1, anno_protein_coding$symbol)])
+comp2_entrez <- as.character(anno_protein_coding$entrezID[match(comp2, anno_protein_coding$symbol)])
+comp3_entrez <- as.character(anno_protein_coding$entrezID[match(comp3, anno_protein_coding$symbol)])
+comp4_entrez <- as.character(anno_protein_coding$entrezID[match(comp4, anno_protein_coding$symbol)])
+comp6_entrez <- as.character(anno_protein_coding$entrezID[match(comp6, anno_protein_coding$symbol)])
+comp10_entrez <- as.character(anno_protein_coding$entrezID[match(comp10, anno_protein_coding$symbol)])
+
+all_entrez <- as.character(anno_protein_coding$entrezID[match(all_entrez, anno_protein_coding$symbol)])
+```
+
+## combine all pathway info
+```{r}
+colnames(hsa_to_path) <- c("pathway", "entrez_ID") 
+colnames(PID_path) <- c("pathway", "entrez_ID")
+
+path_input <- bind_rows(hsa_to_path, PID_path)
+```
+
+## enrichment
+```{r}
+comp1_enrich <- enricher(comp1_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp2_enrich <- enricher(comp2_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp3_enrich <- enricher(comp3_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp4_enrich <- enricher(comp4_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp6_enrich <- enricher(comp6_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp10_enrich <- enricher(comp10_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp1_enrich_out <- comp1_enrich@result
+comp2_enrich_out <- comp2_enrich@result
+comp3_enrich_out <- comp3_enrich@result
+comp4_enrich_out <- comp4_enrich@result
+comp6_enrich_out <- comp6_enrich@result
+comp10_enrich_out <- comp10_enrich@result
+
+# filter to significant pathways
+comp1_enrich_filt <- filter(comp1_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp2_enrich_filt <- filter(comp2_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp3_enrich_filt <- filter(comp3_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp4_enrich_filt <- filter(comp4_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp6_enrich_filt <- filter(comp6_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp10_enrich_filt <- filter(comp10_enrich_out, p.adjust < 0.1 & Count >= 10)
+```
+
+## plot enrichments
+```{r}
+barplot(comp1_enrich, showCategory=20) 
+barplot(comp2_enrich, showCategory=20)
+barplot(comp3_enrich, showCategory=20)
+barplot(comp4_enrich, showCategory=20)
+```
+
+## examine KEGG pathways
+```{r}
+comp1_wkegg_path <- comp1_enrich_filt
+comp1_wkegg_path$Description <- pathway_list$description[match(comp1_wkegg_path$Description, pathway_list$map)]
+
+comp3_wkegg_path <- comp3_enrich_filt
+comp3_wkegg_path$Description <- pathway_list$description[match(comp3_wkegg_path$Description, pathway_list$map)]
+
+```
+
+## save
+```{r}
+# ## save
+# write.csv(comp1_wkegg_path, "../output/comp1_wkegg_path.csv")
+# write.csv(comp3_wkegg_path, "../output/comp3_wkegg_path.csv")
+```
+
+## filter data by region
+```{r}
+rna_meta_TI <- subset(rna_meta_CD_reorder, i.Specimen == "Terminal Ileum")
+rna_meta_C <- subset(rna_meta_CD_reorder, i.Specimen == "Cecum")
+rna_meta_RC <- subset(rna_meta_CD_reorder, i.Specimen == "Right Colon")
+
+micro_TI_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Terminal Ileum")
+micro_C_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Cecum")
+micro_RC_ps <- subset_samples(CD_overlap_ps, i.Specimen == "Right Colon")
+```
+
+## transform RNAseq data
+```{r}
+set.seed(123)
+dds_full_spec <- DESeqDataSetFromMatrix(countData = rna_count_CD_reorder_t, colData = rna_meta_CD_reorder, design = ~ i.Specimen)
+
+smallestGroupSize_spec <- 30
+keep_spec <- rowSums(counts(dds_full_spec) >= 10) >= smallestGroupSize_spec
+dds_full_spec <- dds_full_spec[keep_spec,]
+set.seed(123)
+vsd_spec <- vst(dds_full_spec, blind=FALSE)
+mat_spec <- assay(vsd_spec)
+
+mat_spec <- as.data.frame(t(mat_spec))
+
+mat_TI <- mat_spec[rownames(mat_spec) %in% rna_meta_TI$UNQ_ID,]
+mat_C <- mat_spec[rownames(mat_spec) %in% rna_meta_C$UNQ_ID,]
+mat_RC <- mat_spec[rownames(mat_spec) %in% rna_meta_RC$UNQ_ID,]
+```
+
+## correct regional datasets
+```{r}
+# checks
+identical(rownames(mat_TI), rna_meta_TI$UNQ_ID)
+identical(rownames(mat_C), rna_meta_C$UNQ_ID)
+identical(rownames(mat_RC), rna_meta_RC$UNQ_ID)
+
+# correct data
+set.seed(123)
+rna_corr_TI <- correct_rnaseq_data_within_region(mat_TI, rna_meta_TI)
+set.seed(123)
+rna_corr_C <- correct_rnaseq_data_within_region(mat_C, rna_meta_C)
+set.seed(123)
+rna_corr_RC <- correct_rnaseq_data_within_region(mat_RC, rna_meta_RC)
+set.seed(123)
+micro_corr_TI <- correct_microbiome_data_within_region(micro_TI_ps)
+set.seed(123)
+micro_corr_C <- correct_microbiome_data_within_region(micro_C_ps)
+set.seed(123)
+micro_corr_RC <- correct_microbiome_data_within_region(micro_RC_ps)
+
+# format for sparse-CCA
+rna_corr_TI_mat <- as.matrix(rna_corr_TI)
+rna_corr_C_mat <- as.matrix(rna_corr_C)
+rna_corr_RC_mat <- as.matrix(rna_corr_RC)
+micro_corr_TI_mat <- as.matrix(micro_corr_TI)
+micro_corr_C_mat <- as.matrix(micro_corr_C)
+micro_corr_RC_mat <- as.matrix(micro_corr_RC)
+
+# check
+identical(rownames(rna_corr_TI_mat), rownames(micro_corr_TI_mat))
+identical(rownames(rna_corr_C_mat), rownames(micro_corr_C_mat))
+identical(rownames(rna_corr_RC_mat), rownames(micro_corr_RC_mat))
+```
+
+## run sparse CCA
+```{r}
+current_dir <- dirname(rstudioapi::getSourceEditorContext()$path)
+
+cca.k = 10
+# CLR
+## TI
+set.seed(100)
+bestPenalty_TI <- tune_params_grid_search(rna_corr_TI_mat, micro_corr_TI_mat)
+bestpenaltyX_TI <- bestPenalty_TI[1]
+bestpenaltyY_TI <- bestPenalty_TI[2]
+
+bestpenaltyX_TI
+bestpenaltyY_TI
+
+set.seed(100)
+cca_TI <- run_sparseCCA(rna_corr_TI_mat, micro_corr_TI_mat, cca.k, bestpenaltyX_TI, 
+                            bestpenaltyY_TI, outputFile = paste0(current_dir,
+                                                                     "/../output/CCA_TI_output_",
+                                                                     bestpenaltyX_TI, "_" , 
+                                                                     bestpenaltyY_TI, ".txt"))
+
+## average number of genes and microbes in resulting components
+avg_genes_TI <- get_avg_features(cca_TI[[1]]$u, cca.k)
+avg_genes_TI
+
+avg.microbes_TI <- get_avg_features(cca_TI[[1]]$v, cca.k)
+avg.microbes_TI
+
+
+## C 
+set.seed(100)
+bestPenalty_C <- tune_params_grid_search(rna_corr_C_mat, micro_corr_C_mat)
+bestpenaltyX_C <- bestPenalty_C[1]
+bestpenaltyY_C <- bestPenalty_C[2]
+
+set.seed(100)
+cca_C <- run_sparseCCA(rna_corr_C_mat, micro_corr_C_mat, cca.k, bestpenaltyX_C, 
+                            bestpenaltyY_C, outputFile = paste0(current_dir,
+                                                                    "/../output/CCA_C_output_",
+                                                                     bestpenaltyX_C, "_" , 
+                                                                     bestpenaltyY_C, ".txt"))
+
+## average number of genes and microbes in resulting components
+avg_genes_C <- get_avg_features(cca_C[[1]]$u, cca.k)
+avg_genes_C
+
+avg.microbes_C <- get_avg_features(cca_C[[1]]$v, cca.k)
+avg.microbes_C
+
+
+## RC
+set.seed(100)
+bestPenalty_RC <- tune_params_grid_search(rna_corr_RC_mat, micro_corr_RC_mat)
+bestpenaltyX_RC <- bestPenalty_RC[1]
+bestpenaltyY_RC <- bestPenalty_RC[2]
+
+set.seed(100)
+cca_RC <- run_sparseCCA(rna_corr_RC_mat, micro_corr_RC_mat, cca.k, bestpenaltyX_RC, 
+                            bestpenaltyY_RC, outputFile = paste0(current_dir,
+                                                                     "/../output/CCA_RC_output_",
+                                                                     bestpenaltyX_RC, "_" , 
+                                                                     bestpenaltyY_RC, ".txt"))
+
+## average number of genes and microbes in resulting components
+avg_genes_RC <- get_avg_features(cca_RC[[1]]$u, cca.k)
+avg_genes_RC
+
+avg.microbes_RC <- get_avg_features(cca_RC[[1]]$v, cca.k)
+avg.microbes_RC
+```
+
+## check significance
+```{r}
+## TI
+CCA_pval_TI <- test_significance_LOOCV(rna_corr_TI_mat, micro_corr_TI_mat, bestpenaltyX_TI, bestpenaltyY_TI, cca.k)
+
+length(which(CCA_pval_TI < 0.1))
+which(CCA_pval_TI < 0.1)
+
+CCA_padj_TI <- p.adjust(CCA_pval_TI, method = "BH")
+CCA_padj_TI
+
+length(which(CCA_padj_TI < 0.1))
+which(CCA_padj_TI < 0.1)
+
+## C
+CCA_pval_C <- test_significance_LOOCV(rna_corr_C_mat, micro_corr_C_mat, bestpenaltyX_C, bestpenaltyY_C, cca.k)
+
+length(which(CCA_pval_C < 0.1))
+which(CCA_pval_C < 0.1)
+
+CCA_padj_C <- p.adjust(CCA_pval_C, method = "BH")
+CCA_padj_C
+
+length(which(CCA_padj_C < 0.1))
+which(CCA_padj_C < 0.1)
+
+## RC
+CCA_pval_RC <- test_significance_LOOCV(rna_corr_RC_mat, micro_corr_RC_mat, bestpenaltyX_RC, bestpenaltyY_RC, cca.k)
+
+length(which(CCA_pval_RC < 0.1))
+which(CCA_pval_RC < 0.1)
+
+CCA_padj_RC <- p.adjust(CCA_pval_RC, method = "BH")
+CCA_padj_RC
+
+length(which(CCA_padj_RC < 0.1))
+which(CCA_padj_RC < 0.1)
+
+## save values
+CCA_sig_TI <- cbind(CCA_pval_TI, CCA_padj_TI)
+rownames(CCA_sig_TI) <- paste0("comp_", 1:10)
+
+CCA_sig_C <- cbind(CCA_pval_C, CCA_padj_C)
+rownames(CCA_sig_C) <- paste0("comp_", 1:10)
+
+CCA_sig_RC <- cbind(CCA_pval_RC, CCA_padj_RC)
+rownames(CCA_sig_RC) <- paste0("comp_", 1:10)
+
+# write.csv(CCA_sig_TI, "../output/CCA_sig_TI.csv")
+# write.csv(CCA_sig_C, "../output/CCA_sig_C.csv")
+# write.csv(CCA_sig_RC, "../output/CCA_sig_RC.csv")
+```
+
+## save components
+```{r}
+sig_cutoff <- 0.1
+sig_TI <- which(CCA_pval_TI < sig_cutoff)
+dirname_TI <- paste0(current_dir,"/../output/TI_")
+save_CCA_components(cca_TI[[1]],sig_TI,dirname_TI)
+
+sig_C <- which(CCA_pval_C < sig_cutoff)
+dirname_C <- paste0(current_dir,"/../output/C_")
+save_CCA_components(cca_C[[1]],sig_C,dirname_C)
+
+sig_RC <- which(CCA_pval_RC < sig_cutoff)
+dirname_RC <- paste0(current_dir,"/../output/RC_")
+save_CCA_components(cca_RC[[1]],sig_RC,dirname_RC)
+```
+
+## plot components
+```{r}
+# TI
+rna_TI_comp <- as.data.frame(cca_TI[[2]])
+micro_TI_comp <- as.data.frame(cca_TI[[3]])
+
+colnames(rna_TI_comp) <- sprintf("Comp%02d", 1:10)
+rna_TI_comp$sample <- rownames(rna_TI_comp)
+
+rna_TI_comp <- pivot_longer(rna_TI_comp, cols = !sample, names_to = "component", values_to = "rna")
+
+colnames(micro_TI_comp) <- sprintf("Comp%02d", 1:10)
+micro_TI_comp$sample <- rownames(micro_TI_comp)
+
+micro_TI_comp <- pivot_longer(micro_TI_comp, cols = !sample, names_to = "component", values_to = "micro")
+
+df_TI_comp <- cbind(rna_TI_comp, micro_TI_comp$micro)
+df_TI_comp <- as.data.frame(df_TI_comp)
+colnames(df_TI_comp) <- c("sample", "component", "rna", "microbe")
+
+sparseCCA_TI <- ggplot(df_TI_comp, aes(x = rna, y = microbe), color = black) +
+  geom_point() +
+  geom_smooth(method='lm', formula= y~x) +
+  facet_wrap(~component, scales = "free", , ncol = 2) +
+  labs(x = "RNA canonical variate", y = "Microbe canonical variate")
+
+ggsave("../figures/sparseCCA_TI.pdf", sparseCCA_TI, width = 2.75, height = 8)
+
+
+# C
+rna_C_comp <- as.data.frame(cca_C[[2]])
+micro_C_comp <- as.data.frame(cca_C[[3]])
+
+colnames(rna_C_comp) <- sprintf("Comp%02d", 1:10)
+rna_C_comp$sample <- rownames(rna_C_comp)
+
+rna_C_comp <- pivot_longer(rna_C_comp, cols = !sample, names_to = "component", values_to = "rna")
+
+colnames(micro_C_comp) <- sprintf("Comp%02d", 1:10)
+micro_C_comp$sample <- rownames(micro_C_comp)
+
+micro_C_comp <- pivot_longer(micro_C_comp, cols = !sample, names_to = "component", values_to = "micro")
+
+df_C_comp <- cbind(rna_C_comp, micro_C_comp$micro)
+df_C_comp <- as.data.frame(df_C_comp)
+colnames(df_C_comp) <- c("sample", "component", "rna", "microbe")
+
+sparseCCA_C <- ggplot(df_C_comp, aes(x = rna, y = microbe), color = black) +
+  geom_point() +
+  geom_smooth(method='lm', formula= y~x) +
+  facet_wrap(~component, scales = "free", , ncol = 2) +
+  labs(x = "RNA canonical variate", y = "Microbe canonical variate")
+
+ggsave("../figures/sparseCCA_C.pdf", sparseCCA_C, width = 2.75, height = 8)
+
+
+# RC
+rna_RC_comp <- as.data.frame(cca_RC[[2]])
+micro_RC_comp <- as.data.frame(cca_RC[[3]])
+
+colnames(rna_RC_comp) <- sprintf("Comp%02d", 1:10)
+rna_RC_comp$sample <- rownames(rna_RC_comp)
+
+rna_RC_comp <- pivot_longer(rna_RC_comp, cols = !sample, names_to = "component", values_to = "rna")
+
+colnames(micro_RC_comp) <- sprintf("Comp%02d", 1:10)
+micro_RC_comp$sample <- rownames(micro_RC_comp)
+
+micro_RC_comp <- pivot_longer(micro_RC_comp, cols = !sample, names_to = "component", values_to = "micro")
+
+df_RC_comp <- cbind(rna_RC_comp, micro_RC_comp$micro)
+df_RC_comp <- as.data.frame(df_RC_comp)
+colnames(df_RC_comp) <- c("sample", "component", "rna", "microbe")
+
+sparseCCA_RC <- ggplot(df_RC_comp, aes(x = rna, y = microbe), color = black) +
+  geom_point() +
+  geom_smooth(method='lm', formula= y~x) +
+  facet_wrap(~component, scales = "free", , ncol = 2) +
+  labs(x = "RNA canonical variate", y = "Microbe canonical variate")
+
+ggsave("../figures/sparseCCA_RC.pdf", sparseCCA_RC, width = 2.75, height = 8)
+```
+
+## extract significant components and switch to entrez IDs
+```{r}
+comp1_TI <- cca_TI[[1]][["u"]][,1]
+comp1_TI <- as.data.frame(comp1_TI)
+comp1_TI <- filter(comp1_TI, comp1_TI != 0)
+comp1_TI <- rownames(comp1_TI)
+
+comp2_TI <- cca_TI[[1]][["u"]][,2]
+comp2_TI <- as.data.frame(comp2_TI)
+comp2_TI <- filter(comp2_TI, comp2_TI != 0)
+comp2_TI <- rownames(comp2_TI)
+
+comp3_TI <- cca_TI[[1]][["u"]][,3]
+comp3_TI <- as.data.frame(comp3_TI)
+comp3_TI <- filter(comp3_TI, comp3_TI != 0)
+comp3_TI <- rownames(comp3_TI)
+
+comp9_TI <- cca_TI[[1]][["u"]][,9]
+comp9_TI <- as.data.frame(comp9_TI)
+comp9_TI <- filter(comp9_TI, comp9_TI != 0)
+comp9_TI <- rownames(comp9_TI)
+
+comp1_C <- cca_C[[1]][["u"]][,1]
+comp1_C <- as.data.frame(comp1_C)
+comp1_C <- filter(comp1_C, comp1_C != 0)
+comp1_C <- rownames(comp1_C)
+
+comp6_C <- cca_C[[1]][["u"]][,6]
+comp6_C <- as.data.frame(comp6_C)
+comp6_C <- filter(comp6_C, comp6_C != 0)
+comp6_C <- rownames(comp6_C)
+
+# universe
+all_TI_entrez <- colnames(rna_corr_TI_mat)
+all_C_entrez <- colnames(rna_corr_C_mat)
+all_RC_entrez <- colnames(rna_corr_RC_mat)
+
+# entrez ID
+comp1_TI_entrez <- as.character(anno_protein_coding$entrezID[match(comp1_TI, anno_protein_coding$symbol)])
+comp2_TI_entrez <- as.character(anno_protein_coding$entrezID[match(comp2_TI, anno_protein_coding$symbol)])
+comp3_TI_entrez <- as.character(anno_protein_coding$entrezID[match(comp3_TI, anno_protein_coding$symbol)])
+comp9_TI_entrez <- as.character(anno_protein_coding$entrezID[match(comp9_TI, anno_protein_coding$symbol)])
+comp1_C_entrez <- as.character(anno_protein_coding$entrezID[match(comp1_C, anno_protein_coding$symbol)])
+comp6_C_entrez <- as.character(anno_protein_coding$entrezID[match(comp6_C, anno_protein_coding$symbol)])
+
+all_TI_entrez <- as.character(anno_protein_coding$entrezID[match(all_TI_entrez, anno_protein_coding$symbol)])
+all_C_entrez <- as.character(anno_protein_coding$entrezID[match(all_C_entrez, anno_protein_coding$symbol)])
+```
+
+## enrichment
+```{r}
+comp1_TI_enrich <- enricher(comp1_TI_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_TI_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp2_TI_enrich <- enricher(comp2_TI_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_TI_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp3_TI_enrich <- enricher(comp3_TI_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_TI_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp9_TI_enrich <- enricher(comp9_TI_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_TI_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp1_C_enrich <- enricher(comp1_C_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_C_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp6_C_enrich <- enricher(comp6_C_entrez,
+                   pvalueCutoff = 0.05,
+                   pAdjustMethod = "BH",
+                   universe = all_C_entrez,
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   qvalueCutoff = 0.2,
+                   TERM2GENE = path_input)
+
+comp1_TI_enrich_out <- comp1_TI_enrich@result
+comp2_TI_enrich_out <- comp2_TI_enrich@result
+comp3_TI_enrich_out <- comp3_TI_enrich@result
+comp9_TI_enrich_out <- comp9_TI_enrich@result
+comp1_C_enrich_out <- comp1_C_enrich@result
+comp6_C_enrich_out <- comp6_C_enrich@result
+
+# filter to significant pathways
+comp1_TI_enrich_filt <- filter(comp1_TI_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp2_TI_enrich_filt <- filter(comp2_TI_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp3_TI_enrich_filt <- filter(comp3_TI_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp9_TI_enrich_filt <- filter(comp9_TI_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp1_C_enrich_filt <- filter(comp1_C_enrich_out, p.adjust < 0.1 & Count >= 10)
+comp6_C_enrich_filt <- filter(comp6_C_enrich_out, p.adjust < 0.1 & Count >= 10)
+
+## save
+# write.csv(comp1_TI_enrich_filt, "../output/comp1_TI_enrich_filt.csv")
+# write.csv(comp2_TI_enrich_filt, "../output/comp2_TI_enrich_filt.csv")
+# write.csv(comp3_TI_enrich_filt, "../output/comp3_TI_enrich_filt.csv")
+# write.csv(comp9_TI_enrich_filt, "../output/comp9_TI_enrich_filt.csv")
+# write.csv(comp1_C_enrich_filt, "../output/comp1_C_enrich_filt.csv")
+# write.csv(comp6_C_enrich_filt, "../output/comp6_C_enrich_filt.csv")
+```
+
+## plot
+```{r}
+barplot(comp1_TI_enrich, showCategory=20)
+barplot(comp2_TI_enrich, showCategory=20)
+barplot(comp3_TI_enrich, showCategory=20)
+barplot(comp9_TI_enrich, showCategory=20)
+barplot(comp1_C_enrich, showCategory=20) 
+barplot(comp6_C_enrich, showCategory=20) 
+```
+
+## examine KEGG pathways
+```{r}
+comp2_TI_wkegg_path <- comp2_TI_enrich_filt
+comp2_TI_wkegg_path$Description <- pathway_list$description[match(comp2_TI_wkegg_path$Description, pathway_list$map)]
+
+comp9_TI_wkegg_path <- comp9_TI_enrich_filt
+comp9_TI_wkegg_path$Description <- pathway_list$description[match(comp9_TI_wkegg_path$Description, pathway_list$map)]
+```
+
+## save
+```{r}
+# ## save
+# write.csv(comp2_TI_wkegg_path, "../output/comp2_TI_wkegg_path.csv")
+# write.csv(comp9_TI_wkegg_path, "../output/comp9_TI_wkegg_path.csv")
+```
