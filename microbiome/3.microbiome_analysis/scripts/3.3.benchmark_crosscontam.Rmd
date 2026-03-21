@@ -1,0 +1,441 @@
+---
+title: "qiime_to_phyloseq"
+author: "Erica Ryu"
+date: "7/27/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 7. Remove cross contaminants
+
+## The purpose is to benchmark the samples and then filter based on potential cross contamination
+
+## load packages
+```{r}
+library(ggplot2)
+library(phyloseq)
+library(vegan)
+library(dplyr)
+library(FSA)
+```
+
+## load in objects
+```{r}
+phyloseq <- readRDS("../output/Hershey_ps.rds")
+```
+
+## load functions
+```{r}
+# calculate beta diversity
+beta_ordinate <- function(physeq, beta_dist){
+  # set up data
+  ps.prop <- transform_sample_counts(physeq, function(otu) otu/sum(otu))
+  ps.prop@otu_table <- na.omit(ps.prop@otu_table)
+  beta_inp <- t(as(otu_table(ps.prop), "matrix"))
+  ## calculate distance and ordinate
+  if (beta_dist == "unweighted unifrac") {
+    dist <- unifrac(beta_inp, weighted = FALSE, tree = ps.prop@phy_tree)
+    return(pcoa(dist))
+  } else if (beta_dist == "weighted unifrac") {
+    dist <- unifrac(beta_inp, weighted = TRUE, tree = ps.prop@phy_tree)
+    return(pcoa(dist))
+  } else {
+    ord.pcoa <- ordinate(ps.prop, method = "PCoA", distance = "bray", weighted = FALSE)
+  }
+}
+
+# calculate permanova
+permanova <- function(physeq, beta_dist, perm_var){
+  # set up data
+  ps.prop <- transform_sample_counts(physeq, function(otu) otu/sum(otu))
+  ps.prop@otu_table <- na.omit(ps.prop@otu_table)
+  df <- data.frame(sample_data(ps.prop))
+  beta_inp <- t(as(otu_table(ps.prop), "matrix"))
+  if (beta_dist == "unweighted unifrac") {
+    dist <- unifrac(beta_inp, weighted = FALSE, tree = ps.prop@phy_tree)
+  } else if (beta_dist == "weighted unifrac") {
+    dist <- unifrac(beta_inp, weighted = TRUE, tree = ps.prop@phy_tree)
+  } else {
+    dist = phyloseq::distance(ps.prop, method="bray", normalized=TRUE, parallel=FALSE, fast=TRUE) 
+  }
+  perm_var <- df[[perm_var]]
+   perm <- adonis2(dist ~ perm_var, permutations = 99999)
+   print(perm)
+}
+
+# calculate beta_disper
+beta_disper_test <- function(physeq, disper_var){
+  # set up data
+  ps.prop <- transform_sample_counts(physeq, function(otu) otu/sum(otu))
+  ps.prop@otu_table <- na.omit(ps.prop@otu_table)
+  df <- data.frame(sample_data(ps.prop))
+  beta_inp <- t(as(otu_table(ps.prop), "matrix"))
+  dist = phyloseq::distance(ps.prop, method="bray", normalized=TRUE, parallel=FALSE, fast=TRUE) 
+  disper_var <- df[[disper_var]]
+  disper <- betadisper(dist, disper_var)
+  anova(disper)
+}
+```
+
+## set colors
+```{r}
+threecolors <- c("#1E88E5", "#F0E442", "#D55E00")
+twocolors <- c("#332288", "#52BD0C")
+```
+
+## check DNA conc
+```{r}
+df_plot <- as.data.frame(sample_data(phyloseq))
+df_plot$sample_type_by_exp <- ifelse(grepl("PCRNC", df_plot$p.SourceID) & df_plot$p.SampleType == "first_NC", "PCR_first_NC", 
+                                     ifelse(grepl("QNC", df_plot$p.SourceID) & df_plot$p.SampleType == "first_NC", "extract_first_NC",
+                                     ifelse(grepl("QNC", df_plot$p.SourceID) & df_plot$p.SampleType == "middle_NC", "extract_mid_NC",
+                                     ifelse(grepl("QNC", df_plot$p.SourceID) & df_plot$p.SampleType == "last_NC", "extract_last_NC",
+                                     ifelse(grepl("PCRNC", df_plot$p.SourceID) & df_plot$p.SampleType == "last_NC", "PCR_last_NC",
+                                     ifelse(df_plot$p.SampleType == "PC", "PC", "extraction_product"))))))
+
+df_plot$sample_type_by_exp <- factor(df_plot$sample_type_by_exp, levels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"))
+
+### show DNA conc
+ggplot(df_plot, aes(x = sample_type_by_exp, y = p.CleanedPCRConcentration, group = sample_type_by_exp), color = black) +
+  geom_violin(aes(fill=sample_type_by_exp)) +
+  geom_boxplot(width=0.2, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_fill_manual(name=NULL,
+                     values=c("red", "lime green", "cyan", "slate blue", "blue", "forest green", "gray"),
+                    breaks=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"),
+                    labels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"))+
+  geom_jitter(size = 1, width=0.15, col="black", alpha = 0.8)+
+  labs(title = "Comparing final DNA concentrations", y = "DNA concentration ng/ul", x = "Sample Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none")
+
+# log transformed
+control_conc <- ggplot(df_plot, aes(x = sample_type_by_exp, y = p.CleanedPCRConcentration, group = sample_type_by_exp), color = black) +
+  geom_violin(aes(fill=sample_type_by_exp)) +
+  geom_boxplot(width=0.2, color="black", alpha=0.2, outlier.shape = NA) +
+  # geom_signif(comparisons = list(c("extraction_product", "PCR_first_NC"), c("extraction_product", "PCR_last_NC")), map_signif_level = TRUE, step_increase = 0.1) +
+  scale_fill_manual(name=NULL,
+                     values=c("red", "lime green", "cyan", "slate blue", "blue", "forest green", "gray"),
+                    breaks=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"),
+                    labels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"))+
+  geom_jitter(size = 1, width=0.15, col="black", alpha = 0.8)+
+  labs(title = "Comparing final DNA concentrations", y = "Log transformed DNA concentration ng/ul", x = "Sample Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") +
+  scale_y_log10()
+
+ggsave(file = "../figures/control_conc.pdf", plot = control_conc, width = 7, height = 5)
+
+kruskal.test(p.CleanedPCRConcentration ~ sample_type_by_exp, data = as.data.frame(as.matrix(df_plot)))
+
+sample_comparison <- dunnTest(as.numeric(p.CleanedPCRConcentration) ~ sample_type_by_exp, data = as.data.frame(as.matrix(df_plot)), method="bh")
+
+df_sample_comparison <- sample_comparison[["res"]]
+```
+
+## beta diversity
+```{r}
+# add sample type info
+sample_data(phyloseq)$sample_type_by_exp <- ifelse(grepl("PCRNC", phyloseq@sam_data$p.SourceID) & phyloseq@sam_data$p.SampleType == "first_NC", "PCR_first_NC", 
+                                     ifelse(grepl("QNC", phyloseq@sam_data$p.SourceID) & phyloseq@sam_data$p.SampleType == "first_NC", "extract_first_NC",
+                                     ifelse(grepl("QNC", phyloseq@sam_data$p.SourceID) & phyloseq@sam_data$p.SampleType == "middle_NC", "extract_mid_NC",
+                                     ifelse(grepl("QNC", phyloseq@sam_data$p.SourceID) & phyloseq@sam_data$p.SampleType == "last_NC", "extract_last_NC",
+                                     ifelse(grepl("PCRNC", phyloseq@sam_data$p.SourceID) & phyloseq@sam_data$p.SampleType == "last_NC", "PCR_last_NC",
+                                     ifelse(phyloseq@sam_data$p.SampleType == "PC", "PC", "extraction_product"))))))
+
+# samples and controls
+set.seed(123)
+bray_ordinate <- beta_ordinate(phyloseq, beta_dist = "bray")
+
+## extract axes and format
+PCOAaxes <- bray_ordinate$vectors[,c(1,2,3,4)]
+sample_type_by_exp <- phyloseq@sam_data$sample_type_by_exp
+PCOAaxes_meta <- cbind(PCOAaxes, sample_type_by_exp)
+# check if lined up
+identical(rownames(PCOAaxes), rownames(phyloseq@sam_data))
+df_PCOA <- as.data.frame(as.matrix(PCOAaxes_meta))
+
+sample_w_control <- ggplot(df_PCOA, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) +
+  geom_point(shape = 21, color = "black", size = 3, aes(fill = sample_type_by_exp)) +
+  scale_x_continuous(breaks=seq(-1,1,0.1)) +
+  scale_y_continuous(breaks=seq(-1,1,0.1)) +
+  scale_fill_manual(name=NULL,
+                     values=c("red", "lime green", "cyan", "slate blue", "blue", "forest green", "gray"),
+                    breaks=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"),
+                    labels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC")) +
+  labs(x = "PCoA1 (11.3%)",
+       y = "PCoA2 (9.57%)", 
+       title = "Sample Type")
+
+ggsave(file="../figures/sample_w_control.pdf", plot=sample_w_control, width=6, height=4)
+
+set.seed(123)
+permanova(phyloseq, beta_dist = "bray", perm_var = "sample_type_by_exp")
+
+
+wo_PC <- subset_samples(phyloseq, p.SampleType != "PC")
+
+set.seed(123)
+permanova(wo_PC, beta_dist = "bray", perm_var = "sample_type_by_exp")
+```
+
+<!-- ## check variables of interest as baseline -->
+<!-- ```{r} -->
+<!-- samp_ps <- subset_samples(phyloseq, p.SampleType == "sample") -->
+
+<!-- # specimen -->
+<!-- bray_spec <- subset_samples(samp_ps, i.Disease != "ColorectalCancer") -->
+
+<!-- set.seed(123) -->
+<!-- bray_ordinate_spec <- beta_ordinate(bray_spec, beta_dist = "bray") -->
+
+<!-- PCOAaxes_spec <- bray_ordinate_spec$vectors[,c(1,2,3,4)] -->
+<!-- specimen <- bray_spec@sam_data$i.Specimen -->
+<!-- PCOAaxes_spec_meta <- cbind(PCOAaxes_spec, specimen) -->
+<!-- # check if lined up -->
+<!-- identical(rownames(bray_spec@sam_data), rownames(PCOAaxes_spec)) -->
+<!-- df_PCOA_spec <- as.data.frame(as.matrix(PCOAaxes_spec_meta)) -->
+
+<!-- ggplot(df_PCOA_spec, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) + -->
+<!--   geom_point(shape = 21, color = "black", size = 3, aes(fill = specimen)) + -->
+<!--   scale_x_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   scale_y_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   scale_fill_manual(name=NULL, -->
+<!--                     values=threecolors, -->
+<!--                     breaks=c("Terminal Ileum", "Cecum", "Right Colon"), -->
+<!--                     labels=c("Terminal Ileum", "Cecum", "Right Colon")) + -->
+<!--   stat_ellipse(level = 0.7, aes(x=as.numeric(Axis.1), y = as.numeric(Axis.2), color = specimen), type = "norm") + -->
+<!--   scale_color_manual(name=NULL, -->
+<!--                     values=threecolors, -->
+<!--                     breaks=c("Terminal Ileum", "Cecum", "Right Colon"), -->
+<!--                     labels=c("Terminal Ileum", "Cecum", "Right Colon")) + -->
+<!--   labs(x = "PCoA1 (6.99%)", -->
+<!--        y = "PCoA2 (5.95%)", -->
+<!--        title = "PCoA location benchmark") -->
+
+<!-- set.seed(123) -->
+<!-- permanova(bray_spec, beta_dist = "bray", perm_var = "i.Specimen") -->
+<!-- beta_disper_test(samp_ps, disper_var = "i.Specimen") -->
+
+<!-- # disease -->
+<!-- set.seed(123) -->
+<!-- bray_disease <- subset_samples(samp_ps, i.Specimen == "Right Colon") -->
+
+<!-- bray_ordinate_disease <- beta_ordinate(bray_disease, beta_dist = "bray") -->
+
+<!-- PCOAaxes_disease <- bray_ordinate_disease$vectors[,c(1,2,3,4)] -->
+<!-- disease <- bray_disease@sam_data$i.Disease -->
+<!-- PCOAaxes_disease_meta <- cbind(PCOAaxes_disease, disease) -->
+<!-- # check if lined up -->
+<!-- identical(rownames(bray_disease@sam_data), rownames(PCOAaxes_disease)) -->
+<!-- df_PCOA_disease <- as.data.frame(as.matrix(PCOAaxes_disease_meta)) -->
+
+<!-- ggplot(df_PCOA_disease, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) + -->
+<!--   geom_point(shape = 21, color = "black", size = 3, aes(fill = disease)) + -->
+<!--   scale_x_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   scale_y_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   scale_fill_manual(name=NULL, -->
+<!--                     values=twocolors, -->
+<!--                     breaks=c("Crohns", "ColorectalCancer"), -->
+<!--                     labels=c("Crohn's Disease", "Colorectal Cancer"))+ -->
+<!--   stat_ellipse(level = 0.7, aes(x=as.numeric(Axis.1), y = as.numeric(Axis.2), color = disease), type = "norm") + -->
+<!--   scale_color_manual(name=NULL, -->
+<!--                     values=twocolors, -->
+<!--                     breaks=c("Crohns", "ColorectalCancer"), -->
+<!--                     labels=c("Crohn's Disease", "Colorectal Cancer"))+ -->
+<!--   labs(x = "PCoA1 (6.84%)", -->
+<!--        y = "PCoA2 (5.75%)", -->
+<!--        title = "PCoA disease benchmark") -->
+
+<!-- set.seed(123) -->
+<!-- permanova(bray_disease, beta_dist = "bray", perm_var = "i.Disease") -->
+<!-- beta_disper_test(samp_ps, disper_var = "i.Disease") -->
+<!-- ``` -->
+
+<!-- ## PCoA colored by DNA conc -->
+<!-- ```{r} -->
+<!-- # includes controls -->
+<!-- set.seed(123) -->
+<!-- samp_bray_ordinate <- beta_ordinate(phyloseq, beta_dist = "bray") -->
+
+<!-- ## extract axes and format -->
+<!-- samp_PCOAaxes <- samp_bray_ordinate$vectors[,c(1,2,3,4)] -->
+<!-- PCR_conc <- phyloseq@sam_data$p.CleanedPCRConcentration -->
+
+<!-- PCOAaxes_comb <- cbind(samp_PCOAaxes, PCR_conc) -->
+<!-- # check if lined up -->
+<!-- identical(rownames(samp_PCOAaxes), rownames(phyloseq@sam_data)) -->
+<!-- df_PCOA_comb <- as.data.frame(as.matrix(PCOAaxes_comb)) -->
+
+<!-- dna_conc <- ggplot(df_PCOA_comb, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) + -->
+<!--   geom_point(shape = 21, color = "black", size = 3, aes(fill = PCR_conc)) + -->
+<!--   scale_x_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   scale_y_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   # scale_fill_manual(name=NULL, -->
+<!--   #                    values=c("red", "lime green", "cyan", "slate blue", "blue", "forest green", "gray"), -->
+<!--   #                   breaks=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"), -->
+<!--   #                   labels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"))+ -->
+<!--   labs(x = "PCoA1 (11.3%)", -->
+<!--        y = "PCoA2 (9.57%)",  -->
+<!--        title = "DNA concentration") -->
+
+<!-- ggsave(file="../fig/dna_conc.pdf", plot=dna_conc, width=6, height=4) -->
+
+<!-- set.seed(123) -->
+<!-- permanova(samp_ps, beta_dist = "bray", perm_var = "p.CleanedPCRConcentration") -->
+<!-- ``` -->
+
+<!-- ## get max DNA conc across all controls and by batch -->
+<!-- ```{r} -->
+<!-- df_control <- df_plot[grepl("NC", df_plot$p.SampleType), ] -->
+
+<!-- df_control_set <- df_control[, names(df_control) %in% c("p.CleanedPCRConcentration", "p.SampleType", "p.SourceID", "p.PCRBatch")] -->
+
+<!-- df_control_set$sample_by_exp <- ifelse(grepl("PCRNC", df_control_set$p.SourceID) & df_control_set$p.SampleType == "first_NC", "PCR_first_NC",  -->
+<!--                                 ifelse(grepl("QNC", df_control_set$p.SourceID) & df_control_set$p.SampleType == "first_NC", "extract_first_NC",                                 ifelse(grepl("QNC", df_control_set$p.SourceID) & df_control_set$p.SampleType == "middle_NC", "extract_mid_NC", -->
+<!--                                 ifelse(grepl("QNC", df_control_set$p.SourceID) & df_control_set$p.SampleType == "last_NC", "extract_last_NC", -->
+<!--                                 ifelse(grepl("PCRNC", df_control_set$p.SourceID) & df_control_set$p.SampleType == "last_NC", "PCR_last_NC", -->
+<!--                                 NA))))) -->
+
+<!-- df_control_set$sample_by_exp <- factor(df_control_set$sample_by_exp, levels=c("PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC")) -->
+
+<!-- ggplot(df_control_set, aes(x = sample_by_exp, y = p.CleanedPCRConcentration)) + -->
+<!--   geom_point(shape = 21, color = "black", size = 3, aes(fill = as.factor(p.PCRBatch))) + -->
+<!--   labs(title = "PCR Conc by control", y = "DNA concentration ng/ul", x = "Control Type") + -->
+<!--   theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) + -->
+<!--   theme(legend.position = "none") -->
+
+<!-- # max control DNA conc -->
+<!-- max(df_control_set$p.CleanedPCRConcentration) -->
+<!-- ``` -->
+
+## get sample counts before/after DNA conc removal
+```{r}
+samp_ps <- subset_samples(phyloseq, p.SampleType == "sample")
+
+samp_df <- as.data.frame(as.matrix(samp_ps@sam_data))
+
+# initial sample count by batch, location, disease
+samp_df %>% dplyr::count(ex.ExtractionBatch, sort = TRUE)
+## 1-11, 13 = 12; 12, 14, 15 = 11
+
+samp_df %>% dplyr::count(i.Disease, sort = TRUE)
+## 157 CD, 20 CRC
+
+samp_df %>% dplyr::count(i.Specimen, sort = TRUE)
+## RC = 66, TI = 58, C = 53
+
+# subset to samples above highest neg control within batch
+wo_PC_df <- as.data.frame(as.matrix(wo_PC@sam_data))
+wo_PC_df$Sample_or_Control <- ifelse(wo_PC_df$p.SampleType == "sample", "sample", "control" )
+
+df_by_batch <- split(wo_PC_df, with(wo_PC_df, p.PCRBatch))
+
+## generate vector of max control concentration
+max_control_vector <- c()
+
+for(i in 1:length(df_by_batch)){
+  df <- subset(df_by_batch[[i]], Sample_or_Control == "control")
+  max_control_vector = c(max_control_vector, max(df$p.CleanedPCRConcentration))
+}
+
+## get samples above each batch control's max conc
+df_samp_fin <- wo_PC_df[FALSE,]
+
+for(i in 1:length(df_by_batch)){
+  df_samp <- subset(df_by_batch[[i]], Sample_or_Control == "sample")
+  df_samp_set <- subset(df_samp, p.CleanedPCRConcentration > max_control_vector[i])
+  df_samp_fin <- rbind(df_samp_set, df_samp_fin)
+}
+
+df_samp_fin %>% dplyr::count(ex.ExtractionBatch, sort = TRUE)
+## mostly 11 or 12, one each of 7, 8, 9
+
+df_samp_fin %>% dplyr::count(i.Disease, sort = TRUE)
+## 144 CD, 19 CRC
+
+df_samp_fin %>% dplyr::count(i.Specimen, sort = TRUE)
+# RC = 61, TI = 52, C = 50
+
+# keep samples more than 0.5mg
+df_samp_fin2 <- subset(df_samp_fin, as.numeric(ex.TissueWeight_mg) > 0.5)
+```
+
+<!-- ## PCoA by DNA conc after sample filtering -->
+<!-- ```{r} -->
+<!-- samp_ps_set <- subset_samples(samp_ps, p.PCRId %in% df_samp_fin2$p.PCRId) -->
+
+<!-- set.seed(123) -->
+<!-- samp_set_bray_ordinate <- beta_ordinate(samp_ps_set, beta_dist = "bray") -->
+
+<!-- ## extract axes and format -->
+<!-- samp_set_PCOAaxes <- samp_set_bray_ordinate$vectors[,c(1,2,3,4)] -->
+<!-- PCR_conc_set <- samp_ps_set@sam_data$p.CleanedPCRConcentration -->
+
+<!-- PCOAaxes_set_comb <- cbind(samp_set_PCOAaxes, PCR_conc_set) -->
+<!-- # check if lined up -->
+<!-- identical(rownames(samp_set_PCOAaxes), rownames(samp_ps_set@sam_data)) -->
+
+<!-- df_PCOA_comb_set <- as.data.frame(as.matrix(PCOAaxes_set_comb)) -->
+
+<!-- ggplot(df_PCOA_comb_set, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) + -->
+<!--   geom_point(shape = 21, color = "black", size = 3, aes(fill = PCR_conc_set)) + -->
+<!--   scale_x_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   scale_y_continuous(breaks=seq(-1,1,0.1)) + -->
+<!--   # scale_fill_manual(name=NULL, -->
+<!--   #                    values=c("red", "lime green", "cyan", "slate blue", "blue", "forest green", "gray"), -->
+<!--   #                   breaks=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"), -->
+<!--   #                   labels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"))+ -->
+<!--   labs(x = "PCoA1 (6.41%)", -->
+<!--        y = "PCoA2 (5.48%)",  -->
+<!--        title = "Sample by DNA conc") -->
+
+<!-- set.seed(123) -->
+<!-- permanova(samp_ps_set, beta_dist = "bray", perm_var = "p.CleanedPCRConcentration") -->
+<!-- ``` -->
+
+## get samples that were removed and remove from original ps object
+```{r}
+samp_ret <- intersect(df_samp_fin2$p.PCRId, samp_df$p.PCRId)
+diff <- samp_df$p.PCRId[!(samp_df$p.PCRId %in% samp_ret)]
+diff_vec <- diff
+
+samp_ret_ps <- subset_samples(phyloseq, !(p.PCRId %in% diff_vec))
+```
+
+## check controls and samples
+```{r}
+# samples and controls
+set.seed(123)
+bray_ordinate_ret <- beta_ordinate(samp_ret_ps, beta_dist = "bray")
+
+## extract axes and format
+PCOAaxes_ret <- bray_ordinate_ret$vectors[,c(1,2,3,4)]
+sample_type_by_exp_ret <- samp_ret_ps@sam_data$sample_type_by_exp
+PCOAaxes_meta_ret <- cbind(PCOAaxes_ret, sample_type_by_exp_ret)
+# check if lined up
+identical(rownames(PCOAaxes_ret), rownames(samp_ret_ps@sam_data))
+df_PCOA_ret <- as.data.frame(as.matrix(PCOAaxes_meta_ret))
+
+sample_after_cross_filt <- ggplot(df_PCOA_ret, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) +
+  geom_point(shape = 21, color = "black", size = 3, aes(fill = sample_type_by_exp_ret)) +
+  scale_x_continuous(breaks=seq(-1,1,0.1)) +
+  scale_y_continuous(breaks=seq(-1,1,0.1)) +
+  scale_fill_manual(name=NULL,
+                     values=c("red", "lime green", "cyan", "slate blue", "blue", "forest green", "gray"),
+                    breaks=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC"),
+                    labels=c("extraction_product", "PCR_first_NC", "extract_first_NC", "extract_mid_NC", "extract_last_NC", "PCR_last_NC", "PC")) +
+  labs(x = "PCoA1 (11.52%)",
+       y = "PCoA2 (9.58%)", 
+       title = "Sample Type")
+
+ggsave(file = "../figures/sample_after_cross_contam_filt.pdf", plot = sample_after_cross_filt, width = 7, height = 5)
+```
+
+## save pruned phyloseq object
+```{r}
+saveRDS(samp_ret_ps, "../output/samp_ret_ps.rds")
+```
+

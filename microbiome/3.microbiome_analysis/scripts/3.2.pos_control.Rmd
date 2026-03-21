@@ -1,0 +1,92 @@
+---
+title: "pos_control"
+author: "Erica Ryu"
+date: "7/16/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Positve Control
+
+## The purpose is to check positive controls 
+
+## load packages
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(tidyr)
+library(MicrobiotaProcess)
+```
+
+## load in phyloseq
+```{r}
+phyloseq <- readRDS("../output/Hershey_ps.rds")
+```
+
+## subset to positive controls
+```{r}
+phyloseq <- filter_taxa(phyloseq, function(x) sum(x > 0) >= 2, TRUE)
+
+pos_ps <- subset_samples(phyloseq, p.SampleType == "PC")
+pos_ps <- prune_taxa(taxa_sums(pos_ps)>0, pos_ps)
+
+pos_ps_genus <-  tax_glom(pos_ps, "Genus", NArm = FALSE)
+pos_ps_genus_RA <- transform_sample_counts(pos_ps_genus, function(otu) otu/sum(otu))
+
+classtaxa <- get_taxadf(obj=pos_ps_genus, taxlevel=6)
+
+pclass <- ggbartax(obj=classtaxa) +
+          xlab(NULL) +
+          ylab("relative abundance (%)") + 
+         scale_fill_manual(values=c(colorRampPalette(RColorBrewer::brewer.pal(12,"Set3"))(31))) +
+          guides(fill= guide_legend(keywidth = 0.5, keyheight = 0.5))
+pclass
+
+ggsave(file = "../figures/pos_control.pdf", plot = pclass, width = 7, height = 5)
+```
+
+## format table
+```{r}
+# extract site by species table
+otu_tab <- as(otu_table(pos_ps_genus_RA), "matrix")
+otu_tab <- t(otu_tab)
+tax_table <- as.data.frame(as.matrix(pos_ps_genus_RA@tax_table))
+
+site_species <- merge(tax_table, otu_tab, by = "row.names", all = TRUE)
+site_species <- subset(site_species, select = -c(Row.names))
+
+# change colnames to genus name
+site_species$Genus <- replace_na(site_species$Genus, "_unclassified")
+# and add higher taxonomic level to unclassified
+site_species$Phylum <- ifelse(is.na(site_species$Phylum), site_species$Kingdom, site_species$Phylum)
+site_species$Class <- ifelse(is.na(site_species$Class), site_species$Phylum, site_species$Class)
+site_species$Order <- ifelse(is.na(site_species$Order), site_species$Class, site_species$Order)
+site_species$Family <- ifelse(is.na(site_species$Family), site_species$Order, site_species$Family)
+
+site_species$Genus <- ifelse(site_species$Genus == "_unclassified", paste(site_species$Family, site_species$Genus, sep = ""), site_species$Genus)
+
+rownames(site_species) <- site_species$Genus
+
+site_species_genus <- site_species[, !(colnames(site_species) %in% c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"))]
+
+# agglomerate all other bac into one other column
+site_species_genus_t <- as.data.frame(t(site_species_genus))
+site_species_genus_t$Other <- rowSums(site_species_genus_t[,!colnames(site_species_genus_t) %in% c("Listeria", "Pseudomonas", "Bacillus", "Escherichia-Shigella", "Salmonella", "Lactobacillus", "Enterococcus", "Staphylococcus", "Saccharomyces", "Cryptococcus")])
+
+site_species_plot <- as.data.frame(site_species_genus_t[, colnames(site_species_genus_t) %in% c("Listeria", "Pseudomonas", "Bacillus", "Escherichia-Shigella", "Salmonella", "Lactobacillus", "Enterococcus", "Staphylococcus", "Saccharomyces", "Cryptococcus", "Other")])
+
+# add the expected
+site_species_plot_expect <- rbind(Expected = c(0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12, 0), site_species_plot)
+
+pclass_wexpected <- ggbartax(site_species_plot_expect) +
+          xlab(NULL) +
+          ylab("relative abundance (%)") + 
+         scale_fill_manual(values=c(colorRampPalette(RColorBrewer::brewer.pal(12,"Set3"))(31))) +
+          guides(fill= guide_legend(keywidth = 0.5, keyheight = 0.5))
+
+ggsave(file = "../figures/pos_control_wexpected.pdf", plot = pclass_wexpected, width = 7, height = 5)
+```
+

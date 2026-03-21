@@ -1,0 +1,98 @@
+---
+title: "aldex2_diff_abund"
+author: "Erica Ryu"
+date: "9/2/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 8. Differential abundance
+
+## The purpose of this script is to conduct difference abundance analysis with ALDEx2.
+
+## load packages
+```{r}
+library(phyloseq)
+library(data.table)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(Maaslin2)
+```
+
+## load phyloseq object and set seed
+```{r}
+set.seed(123)
+# oral microbiome phyloseq
+phyloseq <- readRDS("../output/phyloseq_sampleReads_unadj.rds")
+```
+
+## prep taxa table for specimen
+```{r}
+ps_spec <- subset_samples(phyloseq, i.Disease != "ColorectalCancer")
+phy_genus_spec <-  tax_glom(ps_spec, "Genus", NArm = FALSE)
+otu_table_spec <- as.data.frame(as.matrix(phy_genus_spec@otu_table))
+
+setDT(otu_table_spec, keep.rownames = TRUE)[]
+colnames(otu_table_spec)[1] <- "SampleID"
+
+otu_table2_spec <- otu_table_spec %>% data.frame(check.names=FALSE) %>% set_rownames(.$SampleID)
+otu_table2_spec <- otu_table2_spec[,-1]
+otu_table2_spec <- t(otu_table2_spec)
+tax_table_spec <- as.data.frame(as.matrix(phy_genus_spec@tax_table))
+
+otu_tax_spec <- merge(otu_table2_spec, tax_table_spec, by = 0, all = TRUE)
+
+# change colnames to genus name
+otu_tax_spec$Genus <- replace_na(otu_tax_spec$Genus, "_unclassified")
+
+# add higher taxonomic level name to unclassified
+otu_tax_spec$Phylum <- ifelse(is.na(otu_tax_spec$Phylum), otu_tax_spec$Kingdom, otu_tax_spec$Phylum)
+otu_tax_spec$Class <- ifelse(is.na(otu_tax_spec$Class), otu_tax_spec$Phylum, otu_tax_spec$Class)
+otu_tax_spec$Order <- ifelse(is.na(otu_tax_spec$Order), otu_tax_spec$Class, otu_tax_spec$Order)
+otu_tax_spec$Family <- ifelse(is.na(otu_tax_spec$Family), otu_tax_spec$Order, otu_tax_spec$Family)
+otu_tax_spec$Genus <- ifelse(otu_tax_spec$Genus == "_unclassified", paste(otu_tax_spec$Family, otu_tax_spec$Genus, sep = ""), otu_tax_spec$Genus)
+
+# rename completely unclassified ASV
+otu_tax_spec$Genus <- gsub("NA_unclassified", "Unclassified", otu_tax_spec$Genus)
+
+# change uncultured as well
+otu_tax_spec$Family <- ifelse(otu_tax_spec$Family == "uncultured", paste0("uncultured_", otu_tax_spec$Order), otu_tax_spec$Family)
+otu_tax_spec$Genus <- ifelse(grepl("uncultured", otu_tax_spec$Family), otu_tax_spec$Family, otu_tax_spec$Genus)
+otu_tax_spec$Genus <- ifelse(otu_tax_spec$Genus == "uncultured", paste0("uncultured_", otu_tax_spec$Family), otu_tax_spec$Genus)
+
+# set genus column as rownames
+rownames(otu_tax_spec) <- otu_tax_spec$Genus
+
+# remove taxonomic columns
+otu_tax_spec <- subset(otu_tax_spec, select = -c(Row.names, Kingdom, Phylum, Class, Order, Family, Genus, Species))
+otu_tax_spec <- as.data.frame(t(otu_tax_spec))
+
+spec_sam <- as.data.frame(as.matrix(sample_data(phy_genus_spec)))
+
+identical(rownames(otu_tax_spec), rownames(spec_sam))
+
+# make numeric
+spec_sam$i.Age <- as.numeric(spec_sam$i.Age)
+spec_sam$p.CleanedPCRConcentration <- as.numeric(spec_sam$p.CleanedPCRConcentration)
+spec_sam$ex.ExtractionBatch <- as.factor(spec_sam$ex.ExtractionBatch)
+
+```
+
+## run Maaslin2 specimen
+```{r}
+fit_alpha <- Maaslin2(otu_tax_spec, spec_sam, "../output/DA_clr_output", transform = "none", fixed_effects = c("i.Specimen", "i.Sex", "i.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch"), random_effects = c("i.PatientID"), normalization = "CLR", reference="i.Specimen,Terminal Ileum")
+```
+
+## examine all results
+```{r}
+all_results <- read.table("../output/DA_clr_output/all_results.tsv", header = TRUE, sep = "\t")
+all_results_sig <- subset(all_results, pval < 0.05)
+all_results_sig_spec <- subset(all_results_sig, metadata == "i.Specimen")
+
+write.csv(all_results_sig_spec, file = "../output/maaslin2_tab.csv")
+```
+

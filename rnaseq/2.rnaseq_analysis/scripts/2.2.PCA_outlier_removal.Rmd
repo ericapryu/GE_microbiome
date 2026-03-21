@@ -1,0 +1,382 @@
+---
+title: "4.1.rnaseq_pca"
+author: "Erica Ryu"
+date: "10/1/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 4.1.RNAseq PCA
+
+## The purpose of this script is to show separation via PCA
+
+## import data
+```{r}
+counts_normal_uncorr <- read.csv("../output/counts_normal_uncorr.csv", header = TRUE, row.names = 1)
+counts_uncorr <- read.csv("../output/counts_uncorr.csv", header = TRUE, row.names = 1)
+metadata <- read.csv("../data/RNA_metadata.csv", header = TRUE)
+```
+
+## load packages
+```{r}
+library(factoextra)
+library(DESeq2)
+```
+
+## set colors
+```{r}
+threecolors <- c("#1E88E5", "#D55E00", "#CC79A7")
+twocolors <- c("#332288", "#52BD0C")
+```
+
+## subset data to each condition
+```{r}
+counts_normal_uncorr <- as.data.frame(t(counts_normal_uncorr))
+
+# subset to sequenced libraries first
+metadata_lp <- metadata[!is.na(metadata$s.SequencingBatch), ]
+
+# subset to disease
+metadata_disease <- metadata_lp[grepl('Right Colon', metadata_lp$i.Specimen), ]
+
+counts_uncorr_disease <- subset(counts_normal_uncorr, rownames(counts_normal_uncorr) %in% metadata_disease$p.LibraryID)
+  
+## set row order
+metadata_disease <- metadata_disease[order(metadata_disease$p.LibraryID, decreasing = FALSE),]
+
+
+# subset to specimen
+metadata_spec <- metadata_lp[grepl('Crohns', metadata_lp$i.Disease), ]
+
+# counts_lmm_spec <- t(counts_uncorr)
+counts_uncorr_spec <- subset(counts_normal_uncorr, rownames(counts_normal_uncorr) %in% metadata_spec$p.LibraryID)
+
+## set row order
+metadata_spec <- metadata_spec[order(metadata_spec$p.LibraryID, decreasing = FALSE),]
+```
+
+## pca plots
+```{r}
+# disease
+set.seed(123)
+pca_disease <- prcomp(counts_uncorr_disease)
+disease_scores <- as.data.frame(pca_disease$x)
+
+eig.val.disease <- get_eigenvalue(pca_disease)
+eig.val.disease
+# check order
+identical(rownames(disease_scores), metadata_disease$p.LibraryID)
+
+## correct for covariates
+disease_PCA_corr_prep <- as.data.frame(disease_scores)
+
+# make empty dataframe
+disease_PCA_corr <- matrix(ncol = ncol(disease_PCA_corr_prep), nrow = nrow(disease_PCA_corr_prep))
+
+colnames(disease_PCA_corr) <- colnames(disease_PCA_corr_prep)
+rownames(disease_PCA_corr) <- rownames(disease_PCA_corr_prep)
+
+# add variables
+disease_PCA_corr_prep$sex <- as.factor(metadata_disease$i.Sex)
+disease_PCA_corr_prep$age <- as.numeric(metadata_disease$i.Age)
+disease_PCA_corr_prep$lpconc <- as.numeric(metadata_disease$p.LibraryConcentration_ngul)
+disease_PCA_corr_prep$extractor <- as.factor(metadata_disease$ex.Extractedby)
+disease_PCA_corr_prep$RINscore <- as.numeric(metadata_disease$ex.RINscore)
+disease_PCA_corr_prep$sbatch <- as.factor(metadata_disease$s.SequencingBatch)
+
+# run
+n = 1
+
+set.seed(123)
+for(i in colnames(disease_PCA_corr)){
+  obj <- lm(as.formula(paste0("`", i, "`", "~ sex + age + lpconc + extractor + RINscore + sbatch")),  data=disease_PCA_corr_prep)
+  disease_PCA_corr[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+
+disease_PCA_corr <- as.data.frame(disease_PCA_corr)
+
+# add disease
+disease_PCA_corr$disease <- metadata_disease$i.Disease
+
+disease_PCA <- ggplot(disease_PCA_corr, aes(x = PC1, y = PC2)) +
+  geom_point(shape = 17, size = 3, aes(color = disease)) +
+  stat_ellipse(level = 0.7, aes(x = PC1, y = PC2, color = disease), type = "norm") +
+  scale_color_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "Colorectal Cancer"),
+                    labels=c("Crohns", "Colorectal Cancer")) +
+  labs(title = "Disease PCA", x = "PC1 (22.34%)",
+       y = "PC2 (11.4%)")
+
+ggsave("../figures/disease_PCA.pdf", disease_PCA, width=6, height=4)
+
+
+# specimen
+set.seed(123)
+pca_spec <- prcomp(counts_uncorr_spec)
+spec_scores <- as.data.frame(pca_spec$x)
+
+eig.val.spec <- get_eigenvalue(pca_spec)
+eig.val.spec
+
+# check order
+identical(rownames(spec_scores), metadata_spec$p.LibraryID)
+
+## correct for covariates
+spec_PCA_corr_prep <- as.data.frame(spec_scores)
+
+# make empty dataframe
+spec_PCA_corr <- matrix(ncol = ncol(spec_PCA_corr_prep), nrow = nrow(spec_PCA_corr_prep))
+
+colnames(spec_PCA_corr) <- colnames(spec_PCA_corr_prep)
+rownames(spec_PCA_corr) <- rownames(spec_PCA_corr_prep)
+
+# add variables
+spec_PCA_corr_prep$sex <- as.factor(metadata_spec$i.Sex)
+spec_PCA_corr_prep$age <- as.numeric(metadata_spec$i.Age)
+spec_PCA_corr_prep$lpconc <- as.numeric(metadata_spec$p.LibraryConcentration_ngul)
+spec_PCA_corr_prep$extractor <- as.factor(metadata_spec$ex.Extractedby)
+spec_PCA_corr_prep$RINscore <- as.numeric(metadata_spec$ex.RINscore)
+spec_PCA_corr_prep$patientID <- as.factor(metadata_spec$i.PatientID)
+spec_PCA_corr_prep$sbatch <- as.factor(metadata_spec$s.SequencingBatch)
+
+# run
+n = 1
+
+set.seed(123)
+for(i in colnames(spec_PCA_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ sex + age + lpconc + extractor + RINscore + sbatch + (1 | patientID)")),  data=spec_PCA_corr_prep, control = lmerControl(optCtrl = list(maxfun = 1000000)))
+  spec_PCA_corr[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+
+# add spec
+spec_PCA_corr <- as.data.frame(spec_PCA_corr)
+spec_PCA_corr$spec <- metadata_spec$i.Specimen
+
+
+spec_PCA <- ggplot(spec_PCA_corr, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = spec)) +
+  stat_ellipse(level = 0.7, aes(x = PC1, y = PC2, color = spec), type = "norm") +
+  scale_color_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  labs(title = "Location PCA", x = "PC1 (40.03%)",
+       y = "PC2 (14.49%)")
+
+ggsave("../figures/specimen_PCA.pdf", spec_PCA, width=6, height=4)
+```
+
+## check the samples that are in unexpected places
+```{r}
+# filter to TI
+TI <- subset(spec_PCA_corr, spec == "Terminal Ileum")
+
+# filter to RC
+RC <- subset(spec_PCA_corr, spec == "Right Colon")
+
+# filter to C
+C <- subset(spec_PCA_corr, spec == "Cecum")
+```
+
+## remove batch 11 and outliers
+```{r}
+# throw out batch 11
+metadata_wolp11 <- metadata_lp[metadata_lp$p.LibraryBatch != 11, ]
+
+counts_normal_uncorr_wolp11 <- subset(counts_normal_uncorr, rownames(counts_normal_uncorr) %in% metadata_wolp11$p.LibraryID)
+
+counts_uncorr <- as.data.frame(t(counts_uncorr))
+counts_uncorr_wolp11 <- subset(counts_uncorr, rownames(counts_uncorr) %in% metadata_wolp11$p.LibraryID)
+
+## remove other outliers
+metadata_woOutlier <- metadata_wolp11[!(metadata_wolp11$p.LibraryID %in% c("LP004", "LP114", "LP047", "LP099", "LP005", "LP147", "LP155", "LP149", "LP136", "LP137")), ]
+
+counts_normal_uncorr_woOutlier <- subset(counts_normal_uncorr_wolp11, rownames(counts_normal_uncorr_wolp11) %in% metadata_woOutlier$p.LibraryID)
+
+counts_uncorr_woOutlier <- subset(counts_uncorr_wolp11, rownames(counts_uncorr_wolp11) %in% metadata_woOutlier$p.LibraryID)
+```
+
+## remake PCA w/o outliers
+```{r}
+# subset to specimen
+metadata_spec_woOutlier <- metadata_woOutlier[grepl('Crohns', metadata_woOutlier$i.Disease), ]
+metadata_spec_woOutlier <- metadata_spec_woOutlier[order(metadata_spec_woOutlier$p.LibraryID, decreasing = FALSE),]
+
+counts_uncorr_spec_woOutlier <- subset(counts_normal_uncorr_woOutlier, rownames(counts_normal_uncorr_woOutlier) %in% metadata_spec_woOutlier$p.LibraryID)
+
+set.seed(123)
+pca_spec_woOutlier <- prcomp(counts_uncorr_spec_woOutlier)
+spec_scores_woOutlier <- as.data.frame(pca_spec_woOutlier$x)
+
+eig.val.spec_woOutlier <- get_eigenvalue(pca_spec_woOutlier)
+eig.val.spec_woOutlier
+
+# check order
+identical(rownames(spec_scores_woOutlier), metadata_spec_woOutlier$p.LibraryID)
+
+## correct for covariates
+spec_PCA_corr_prep_woOutlier <- as.data.frame(spec_scores_woOutlier)
+
+# make empty dataframe
+spec_PCA_corr_woOutlier <- matrix(ncol = ncol(spec_PCA_corr_prep_woOutlier), nrow = nrow(spec_PCA_corr_prep_woOutlier))
+
+colnames(spec_PCA_corr_woOutlier) <- colnames(spec_PCA_corr_prep_woOutlier)
+rownames(spec_PCA_corr_woOutlier) <- rownames(spec_PCA_corr_prep_woOutlier)
+
+# add variables
+spec_PCA_corr_prep_woOutlier$sex <- as.factor(metadata_spec_woOutlier$i.Sex)
+spec_PCA_corr_prep_woOutlier$age <- as.numeric(metadata_spec_woOutlier$i.Age)
+spec_PCA_corr_prep_woOutlier$lpconc <- as.numeric(metadata_spec_woOutlier$p.LibraryConcentration_ngul)
+spec_PCA_corr_prep_woOutlier$extractor <- as.factor(metadata_spec_woOutlier$ex.Extractedby)
+spec_PCA_corr_prep_woOutlier$RINscore <- as.numeric(metadata_spec_woOutlier$ex.RINscore)
+spec_PCA_corr_prep_woOutlier$patientID <- as.factor(metadata_spec_woOutlier$i.PatientID)
+spec_PCA_corr_prep_woOutlier$sbatch <- as.factor(metadata_spec_woOutlier$s.SequencingBatch)
+
+# run
+n = 1
+
+set.seed(123)
+for(i in colnames(spec_PCA_corr_woOutlier)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ sex + age + lpconc + extractor + RINscore + sbatch + (1 | patientID)")),  data=spec_PCA_corr_prep_woOutlier, control = lmerControl(optCtrl = list(maxfun = 1000000)))
+  spec_PCA_corr_woOutlier[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+
+# add spec
+spec_PCA_corr_woOutlier <- as.data.frame(spec_PCA_corr_woOutlier)
+spec_PCA_corr_woOutlier$spec <- metadata_spec_woOutlier$i.Specimen
+
+specimen_PCA_wo_outliers <- ggplot(spec_PCA_corr_woOutlier, aes(x = PC1, y = PC2)) +
+  geom_point(shape = 21, size = 3, color = "black", aes(fill = spec)) +
+  stat_ellipse(level = 0.7, aes(x = PC1, y = PC2, color = spec), type = "norm") +
+  scale_fill_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  scale_color_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  labs(title = "Location PCA", x = "PC1 (44.71%)",
+       y = "PC2 (9.15%)")
+
+ggsave("../figures/specimen_PCA_wo_outliers.pdf", specimen_PCA_wo_outliers, width=6, height=4)
+```
+## save 
+```{r}
+write.csv(metadata_wolp11, "../output/metadata_fin.csv")
+write.csv(counts_normal_uncorr_wolp11, "../output/counts_normal_uncorr_fin.csv")
+write.csv(counts_uncorr_wolp11, "../output/counts_uncorr_fin.csv")
+
+# w/o outlier
+write.csv(metadata_woOutlier, "../output/metadata_fin_woOutlier.csv")
+write.csv(counts_normal_uncorr_woOutlier, "../output/counts_normal_uncorr_fin_woOutlier.csv")
+write.csv(counts_uncorr_woOutlier, "../output/counts_uncorr_fin_woOutlier.csv")
+```
+
+## baseline stats
+```{r}
+# samples per location prep
+df.mat_RNA <- as.data.frame(metadata_woOutlier)
+df.mat_RNA <- filter(df.mat_RNA, i.Disease == "Crohns")
+df_spec_RNA <- df.mat_RNA[,c("i.Specimen"), drop=FALSE]
+
+# how many samples per specimen?
+df_spec_RNA %>% 
+  group_by(i.Specimen) %>%
+  dplyr::count()
+```
+
+## check for variation within individual - data prep
+```{r}
+counts_uncorr_woOutlier_t <- t(counts_uncorr_woOutlier)
+
+set.seed(123)
+dds <- DESeqDataSetFromMatrix(countData = counts_uncorr_woOutlier_t, colData = metadata_woOutlier, design = ~ 1)
+smallestGroupSize <- ncol(metadata_woOutlier)/3
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+dds <- dds[keep,]
+set.seed(123)
+vsd <- vst(dds, blind=FALSE)
+mat_inte <- assay(vsd)
+
+## Convert mat_inte to a dataframe and transpose
+mat_inte_df <- as.data.frame(t(mat_inte))
+# 
+# mat_inte_df <- mat_inte_df[, colnames(mat_inte_df) %in% anno_protein_coding$symbol]
+
+## Create an empty matrix for corrected data
+mat_inte_corr <- matrix(ncol = ncol(mat_inte_df), nrow = nrow(mat_inte_df))
+colnames(mat_inte_corr) <- colnames(mat_inte_df)
+rownames(mat_inte_corr) <- rownames(mat_inte_df)
+
+# Add variables to mat_inte_df
+mat_inte_df$lpconc <- as.numeric(metadata_woOutlier$p.LibraryConcentration_ngul)
+mat_inte_df$extractor <- as.factor(metadata_woOutlier$ex.Extractedby)
+mat_inte_df$sbatch <- as.factor(metadata_woOutlier$s.SequencingBatch)
+mat_inte_df$RINscore <- as.numeric(metadata_woOutlier$ex.RINscore)
+mat_inte_df$sex <- as.factor(metadata_woOutlier$i.Sex)
+mat_inte_df$age <- as.numeric(metadata_woOutlier$i.Age)
+mat_inte_df$spec <- as.factor(metadata_woOutlier$i.Specimen)
+
+# Run linear models and store residuals
+set.seed(123)
+for(i in colnames(mat_inte_corr)){
+  obj <- lm(as.formula(paste0("`", i, "`", "~ lpconc + sbatch + RINscore + extractor +
+                                sex + age + spec")),  data = mat_inte_df)
+  mat_inte_corr[,i] <- resid(obj)
+}
+
+# filter low variance genes
+mat_inte_corr_t <- t(mat_inte_corr)
+## calculate variance for each row
+gene_variance <- apply(mat_inte_corr_t, 1, var)
+## calculate the 25% quantile of variance
+variance_cutoff <- quantile(gene_variance, 0.25)
+## filter to genes above the 25% quantile of variance
+mat_inte_filt <-  mat_inte_corr_t[gene_variance > variance_cutoff, ]
+# Convert the corrected matrix to a dataframe
+rna_corr_indiv <- as.data.frame(t(mat_inte_filt))
+```
+
+## compare variation within individual
+```{r}
+rna_indiv_dist <- dist(rna_corr_indiv)
+rna_indiv_df <- reshape2::melt(as.matrix(rna_indiv_dist), varnames = c("row", "col"))
+rna_indiv_df <- rna_indiv_df[rna_indiv_df$value != 0,]
+
+rna_indiv_df$row <- metadata_woOutlier$i.PatientID[match(rna_indiv_df$row, metadata_woOutlier$p.LibraryID)]
+rna_indiv_df$col <- metadata_woOutlier$i.PatientID[match(rna_indiv_df$col, metadata_woOutlier$p.LibraryID)]
+
+rna_indiv_df$sort <- ifelse(rna_indiv_df$row == rna_indiv_df$col, "same", "different")
+
+# calculate significance
+rna_indiv_aov <- aov(value ~ sort, data = rna_indiv_df)
+summary(rna_indiv_aov)
+
+# plot
+rna_intra <- ggplot(rna_indiv_df, aes(x = sort, y = value, group = sort), color = black) +
+  geom_violin(aes(fill = sort), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("same", "different")) +
+  scale_fill_manual(name=NULL,
+                    values=c("black", "red"),
+                    breaks=c("same", "different"),
+                    labels=c("Intra", "Inter")) +
+  # geom_jitter(size = 1, width=0.15, col="darkgreen") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "Distance", title = "RNAseq")
+
+
+ggsave(file = "../figures/rna_intra.pdf", plot = rna_intra, width = 7, height = 4)
+```

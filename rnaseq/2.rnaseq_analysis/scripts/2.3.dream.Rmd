@@ -1,0 +1,283 @@
+---
+title: "full_deseq2"
+author: "Erica Ryu"
+date: "7/23/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 5. Dream
+
+## The purpose of this script is to conduct differential expression analysis with the all RNAseq data
+
+## load packages
+```{r}
+library(variancePartition)
+library(edgeR)
+library(dplyr)
+library(tibble)
+```
+
+## import data
+```{r}
+counts <- read.csv("../output/counts_uncorr_fin_woOutlier.csv", header = TRUE, row.names = 1)
+metadata <- read.csv("../output/metadata_fin_woOutlier.csv", header = TRUE)
+```
+
+## subset data to each condition
+```{r}
+# subset to sequenced libraries first
+metadata_lp <- metadata[!is.na(metadata$s.SequencingBatch), ]
+
+# fix object type
+metadata_lp$s.SequencingBatch <- as.factor(metadata_lp$s.SequencingBatch)
+```
+
+## separate data based on variable of interest
+```{r}
+# subset to disease
+metadata_disease <- metadata_lp[grepl('Right Colon', metadata_lp$i.Specimen), ]
+
+counts_disease <-  counts[(rownames(counts) %in% metadata_disease$p.LibraryID),]
+
+## set row order
+metadata_disease <- metadata_disease[order(metadata_disease$p.LibraryID, decreasing = FALSE),]
+
+## check order
+identical(rownames(counts_disease), metadata_disease$p.LibraryID)
+
+counts_disease_t <- t(counts_disease)
+
+
+# subset to specimen
+metadata_spec <- metadata_lp[grepl('Crohns', metadata_lp$i.Disease), ]
+
+counts_spec <-  counts[(rownames(counts) %in% metadata_spec$p.LibraryID),]
+
+## set row order
+metadata_spec <- metadata_spec[order(metadata_spec$p.LibraryID, decreasing = FALSE),]
+
+## check order
+identical(rownames(counts_spec), metadata_spec$p.LibraryID)
+
+counts_spec_t <- t(counts_spec)
+```
+
+## prep count data
+```{r}
+# disease
+## filter genes if cpm higher than 0.5 across at least 2 samples
+isexpr_disease <- rowSums(cpm(counts_disease_t) > 0.5) >= 2
+## DGElist object
+dge_disease <- DGEList(counts_disease_t[isexpr_disease, ])
+## TMM normalization
+dge_disease <- calcNormFactors(dge_disease)
+
+# specimen
+## filter for genes with cpm higher than 0.5 across at least 37 samples
+isexpr_spec <- rowSums(cpm(counts_spec_t) > 0.5) >= 37
+
+## DGElist object
+dge_spec <- DGEList(counts_spec_t[isexpr_spec,])
+## TMM normalization
+dge_spec <- calcNormFactors(dge_spec)
+```
+
+## run dream
+```{r}
+# to run in parallel
+param <- SnowParam(4, "SOCK", progressbar = TRUE)
+
+# disease
+## formula
+disease_form <- ~ i.Disease + i.Sex + i.Age + p.LibraryConcentration_ngul + ex.Extractedby + s.SequencingBatch + ex.RINscore
+
+## fix format of metadata
+metadata_disease$i.Disease <- gsub("\\s+", "", metadata_disease$i.Disease)
+rownames(metadata_disease) <- metadata_disease$p.LibraryID
+metadata_disease$i.Sex <- as.factor(metadata_disease$i.Sex)
+metadata_disease$i.Age <- as.numeric(metadata_disease$i.Age)
+metadata_disease$p.LibraryConcentration_ngul <- as.numeric(metadata_disease$p.LibraryConcentration_ngul)
+metadata_disease$ex.Extractedby <- as.factor(metadata_disease$ex.Extractedby)
+metadata_disease$s.SequencingBatch <- as.factor(metadata_disease$s.SequencingBatch)
+metadata_disease$ex.RINscore <- as.numeric(metadata_disease$ex.RINscore)
+
+## estimate weights
+vobjDream_disease <- voomWithDreamWeights(dge_disease, disease_form, metadata_disease, BPPARAM = param)
+
+## fit dream model
+fitlm_disease <- dream(vobjDream_disease, disease_form, metadata_disease)
+fitlm_disease_bayes <- eBayes(fitlm_disease)
+
+## Get results of hypothesis test on coefficients of interest
+disease_tab <- topTable(fitlm_disease_bayes, coef = "i.DiseaseCrohns", number = 20857)
+## nothing significant
+
+# specimen
+## formula
+specimen_form <- ~ 0 + i.Specimen + (1 | i.PatientID) + i.Sex + i.Age + p.LibraryConcentration_ngul + ex.RINscore + ex.Extractedby + s.SequencingBatch
+
+## fix format of metadata
+metadata_spec$i.Specimen <- gsub("Right Colon", "RightColon", metadata_spec$i.Specimen)
+metadata_spec$i.Specimen <- gsub("Terminal Ileum", "TerminalIleum", metadata_spec$i.Specimen)
+rownames(metadata_spec) <- metadata_spec$p.LibraryID
+metadata_spec$i.Sex <- as.factor(metadata_spec$i.Sex)
+metadata_spec$i.Age <- as.numeric(metadata_spec$i.Age)
+metadata_spec$p.LibraryConcentration_ngul <- as.numeric(metadata_spec$p.LibraryConcentration_ngul)
+metadata_spec$ex.Extractedby <- as.factor(metadata_spec$ex.Extractedby)
+metadata_spec$s.SequencingBatch <- as.factor(metadata_spec$s.SequencingBatch)
+metadata_spec$ex.RINscore <- as.numeric(metadata_spec$ex.RINscore)
+
+## make contrasts
+spec_contrast <- makeContrastsDream(specimen_form, metadata_spec,
+  contrasts = c(
+    compareRC_TI = "i.SpecimenRightColon - i.SpecimenTerminalIleum",
+    compareTI_C = "i.SpecimenTerminalIleum - i.SpecimenCecum",
+    compareRC_C = "i.SpecimenRightColon - i.SpecimenCecum"
+  )
+)
+
+## Visualize contrast matrix
+plotContrasts(spec_contrast)
+
+## estimate weights
+vobjDream_spec <- voomWithDreamWeights(dge_spec, specimen_form, metadata_spec, BPPARAM = param)
+
+## fit dream model
+fitmm_spec <- dream(vobjDream_spec, specimen_form, metadata_spec, spec_contrast)
+fitmm_spec_bayes <- eBayes(fitmm_spec)
+
+colnames(fitmm_spec_bayes)
+
+## Get results of hypothesis test on coefficients of interest
+RC_TI_tab <- topTable(fitmm_spec_bayes, coef = "compareRC_TI", number = 15788)
+TI_C_tab <- topTable(fitmm_spec_bayes, coef = "compareTI_C", number = 15788)
+RC_C_tab <- topTable(fitmm_spec_bayes, coef = "compareRC_C", number = 15788)
+```
+
+## save dream output
+```{r}
+write.csv(RC_TI_tab, "../output/RC_TI_dream.csv")
+write.csv(TI_C_tab, "../output/TI_C_dream.csv")
+write.csv(RC_C_tab, "../output/RC_C_dream.csv")
+```
+
+## sig genes
+```{r}
+# disease
+disease_tab <- mutate(disease_tab, gene_type = case_when(logFC >= 2 & adj.P.Val <= 0.05 ~ "up",
+                               logFC <= -2 & adj.P.Val <= 0.05 ~ "down",
+                               TRUE ~ "ns")) 
+
+cols <- c("up" = "#ffad73", "down" = "#26b3ff", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+disease_DE <- ggplot(disease_tab, aes(x = logFC,
+             y = -log10(adj.P.Val),
+             fill = gene_type,    
+             size = gene_type,
+             alpha = gene_type)) + 
+  geom_point(shape = 21, # Specify shape and colour as fixed local parameters    
+             colour = "black") + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(-2, 2),
+             linetype = "dashed") +
+  scale_fill_manual(values = cols) + # Modify point colour
+  scale_size_manual(values = sizes) + # Modify point size
+  scale_alpha_manual(values = alphas)
+
+ggsave("../figures/disease_DE.pdf", disease_DE, width=6, height=4)
+
+
+# specimen
+RC_TI_tab_sig <- subset(RC_TI_tab, adj.P.Val < 0.05 & abs(logFC) > 2)
+# 1318
+TI_C_tab_sig <- subset(TI_C_tab, adj.P.Val < 0.05 & abs(logFC) > 2)
+# 1358
+RC_C_tab_sig <- subset(RC_C_tab, adj.P.Val < 0.05 & abs(logFC) > 2)
+# 6
+
+## RC TI
+RC_TI_tab <- mutate(RC_TI_tab, gene_type = case_when(logFC >= 2 & adj.P.Val <= 0.05 ~ "up",
+                               logFC <= -2 & adj.P.Val <= 0.05 ~ "down",
+                               TRUE ~ "ns")) 
+
+cols <- c("up" = "#ffad73", "down" = "#26b3ff", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+RC_TI_DE <- ggplot(RC_TI_tab, aes(x = logFC,
+             y = -log10(adj.P.Val),
+             fill = gene_type,    
+             size = gene_type,
+             alpha = gene_type)) + 
+  geom_point(shape = 21, # Specify shape and colour as fixed local parameters    
+             colour = "black") + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(-2, 2),
+             linetype = "dashed") +
+  scale_fill_manual(values = cols) + # Modify point colour
+  scale_size_manual(values = sizes) + # Modify point size
+  scale_alpha_manual(values = alphas)
+
+ggsave("../figures/RC_TI_DE.pdf", RC_TI_DE, width=3.5, height=4)
+
+## TI C
+TI_C_tab <- mutate(TI_C_tab, gene_type = case_when(logFC >= 2 & adj.P.Val <= 0.05 ~ "up",
+                               logFC <= -2 & adj.P.Val <= 0.05 ~ "down",
+                               TRUE ~ "ns")) 
+
+cols <- c("up" = "#ffad73", "down" = "#26b3ff", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+TI_C_DE <- ggplot(TI_C_tab, aes(x = logFC,
+             y = -log10(adj.P.Val),
+             fill = gene_type,    
+             size = gene_type,
+             alpha = gene_type)) + 
+  geom_point(shape = 21, # Specify shape and colour as fixed local parameters    
+             colour = "black") + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(-2, 2),
+             linetype = "dashed") +
+  scale_fill_manual(values = cols) + # Modify point colour
+  scale_size_manual(values = sizes) + # Modify point size
+  scale_alpha_manual(values = alphas)
+
+ggsave("../figures/TI_C_DE.pdf", TI_C_DE, width=3.5, height=4)
+
+## RC C
+RC_C_tab <- mutate(RC_C_tab, gene_type = case_when(logFC >= 2 & adj.P.Val <= 0.05 ~ "up",
+                               logFC <= -2 & adj.P.Val <= 0.05 ~ "down",
+                               TRUE ~ "ns")) 
+
+cols <- c("up" = "#ffad73", "down" = "#26b3ff", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+RC_C_DE <- ggplot(RC_C_tab, aes(x = logFC,
+             y = -log10(adj.P.Val),
+             fill = gene_type,    
+             size = gene_type,
+             alpha = gene_type)) + 
+  geom_point(shape = 21, # Specify shape and colour as fixed local parameters    
+             colour = "black") + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(-2, 2),
+             linetype = "dashed") +
+  scale_fill_manual(values = cols) + # Modify point colour
+  scale_size_manual(values = sizes) + # Modify point size
+  scale_alpha_manual(values = alphas)
+
+ggsave("../figures/RC_C_DE.pdf", RC_C_DE, width=3.5, height=4)
+```
+

@@ -1,0 +1,330 @@
+---
+title: "full_deseq2"
+author: "Erica Ryu"
+date: "7/23/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 4.Covariate Correction
+
+## The purpose of this script is to correct for technical and biological covariates
+
+## load packages
+```{r}
+library(tibble)
+library(factoextra)
+library(lme4)
+library(lmtest)
+library(dplyr)
+library(ggplot2)
+library(car)
+library(DESeq2)
+```
+
+## import data
+```{r}
+counts <- read.table("../../1.read_processing/output/3.feature_counts/reverse_counts.txt", header = TRUE)
+metadata <- read.csv("../data/RNA_metadata.csv", header = TRUE)
+
+# subset to sequenced libraries first
+metadata_lp <- metadata[!is.na(metadata$s.SequencingBatch), ]
+```
+
+## format count data
+```{r}
+counts_clean <- counts
+# clean up count columns
+for ( col in 1:ncol(counts_clean)){
+    colnames(counts_clean)[col] <-  sub("_S.*", "", colnames(counts_clean)[col])
+}
+
+for ( col in 1:ncol(counts_clean)){
+    colnames(counts_clean)[col] <-  sub("^output.2.star.", "", colnames(counts_clean)[col])
+}
+
+counts_clean_form <- column_to_rownames(counts_clean, var = "Geneid")
+
+counts_clean_form <- counts_clean_form[!names(counts_clean_form) %in% c("Chr", "Start", "End", "Strand", "Length")]
+
+# filter out genes with zero counts
+counts_clean_form <- counts_clean_form[rowSums(counts_clean_form) != 0, ]
+
+## make batches into factors
+metadata_lp$s.SequencingBatch <- as.factor(metadata_lp$s.SequencingBatch)
+
+```
+
+## save uncorrected
+```{r}
+write.csv(counts_clean_form, file = "../output/counts_uncorr.csv")
+```
+
+## transform counts
+```{r}
+set.seed(123)
+dds <- DESeqDataSetFromMatrix(countData = counts_clean_form, colData = metadata_lp, design = ~ i.Disease + i.Specimen)
+
+# filter low expression counts
+smallestGroupSize <- 15
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+dds <- dds[keep,]
+
+# transform
+set.seed(123)
+vsd <- vst(dds, blind=FALSE)
+mat <- assay(vsd)
+```
+
+## save normalized
+```{r}
+write.csv(mat, file = "../output/counts_normal_uncorr.csv")
+```
+
+## generate PCs
+```{r}
+counts_pc <- mat
+counts_pc_t <- t(counts_pc)
+
+set.seed(123)
+pca <- prcomp(counts_pc_t)
+pca_scores <- as.data.frame(pca$x)
+eig.val <- get_eigenvalue(pca)
+```
+
+## check for significant associations
+```{r}
+# filter to PCs that explain at least 90% of variation
+pca_scores_PC62 <- 1:62
+pca_scores_PC62 <- paste0('PC', pca_scores_PC62)
+
+pca_scores_vectors <- pca_scores[, pca_scores_PC62]
+
+# remove metadata columns with NA
+metadata_noNA <- metadata_lp
+
+metadata_noNA[metadata_noNA==""] <- NA
+
+metadata_noNA <- metadata_noNA[ , colSums(is.na(metadata_noNA))==0]
+
+metadata_noNA <- metadata_noNA[order(metadata_noNA$p.LibraryID, decreasing = FALSE),]
+
+# check order
+identical(rownames(pca_scores_vectors), metadata_noNA$p.LibraryID)
+
+# set up df for check
+df_comb <- cbind(pca_scores_vectors, metadata_noNA)
+
+# check factor
+df_comb$i.Sex <- as.factor(df_comb$i.Sex)
+df_comb$i.Age <- as.numeric(df_comb$i.Age)
+df_comb$i.OR.Age <- as.numeric(df_comb$i.OR.Age)
+df_comb$p.LibraryConcentration_ngul <- as.numeric(df_comb$p.LibraryConcentration_ngul)
+df_comb$ex.RINscore <- as.numeric(df_comb$ex.RINscore)
+df_comb$ex.Extractedby <- as.factor(df_comb$ex.Extractedby)
+df_comb$s.SequencingBatch <- as.factor(df_comb$s.SequencingBatch)
+df_comb$ex.ExtractionBatch <- as.factor(df_comb$ex.ExtractionBatch)
+df_comb$p.LibraryBatch <- as.factor(df_comb$p.LibraryBatch)
+df_comb$i.PatientID <- as.factor(df_comb$i.PatientID)
+
+# check for associations
+df_associations <- matrix(ncol = 9, nrow = ncol(pca_scores_vectors))
+colnames(df_associations) <- c("i.Sex", "i.Age", "i.OR.Age", "p.LibraryConcentration_ngul", "ex.RINscore", "ex.Extractedby", "ex.ExtractionBatch", "p.LibraryBatch", "s.SequencingBatch")
+rownames(df_associations) <- colnames(pca_scores_vectors)
+
+set.seed(123)
+for(i in colnames(df_associations)){
+  for (j in rownames(df_associations)) {
+    print(as.formula(get(j) ~ get(i)))
+    obj <- print(lm(as.formula(get(j) ~ get(i)), data = df_comb))
+    df_associations[j,i] <- summary(obj)$coefficients[,"Pr(>|t|)"][[2]]
+  }
+}
+
+# multiple test correction
+df_associations_BH <- as.data.frame(t(df_associations))
+
+df_associations_BH <- sapply(df_associations_BH, p.adjust, method="BH", n = 9)
+df_associations_BH <- t(df_associations_BH)
+colnames(df_associations_BH) <- colnames(df_associations)
+```
+
+## save covariate dfs
+```{r}
+write.csv(df_associations_BH, "../output/covariate_rna.csv")
+```
+
+## plot covariate associations
+```{r}
+df_associations_BH_df <- as.data.frame(df_associations_BH)
+
+df_associations_BH_df$axis <- rownames(df_associations_BH_df)
+
+## convert format
+df_associations_BH_long <- pivot_longer(df_associations_BH_df, !axis, names_to = "covariate", values_to = "padj")
+
+## order by axis
+df_associations_BH_long <- mutate(df_associations_BH_long, axis = factor(axis, levels = unique(rownames(df_associations_BH_df))))
+
+ggplot(df_associations_BH_long, aes(x = covariate, y = axis, fill = padj)) +
+  geom_tile() +
+  scale_fill_gradient(high="white", low="#009194", limits=c(0,1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  labs(x = "Covariate", y = "Axis")
+```
+
+## check for random effects
+```{r}
+# patient ID
+## set up vector
+patient_rand_vec <- c()
+n = 1
+
+set.seed(123)
+for(i in colnames(pca_scores_vectors)){
+  full_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.LibraryConcentration_ngul + ex.Extractedby + ex.RINscore + s.SequencingBatch + (1 | i.PatientID)")), data = df_comb)
+  reduced_model <- lm(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.LibraryConcentration_ngul + ex.Extractedby + ex.RINscore + s.SequencingBatch")), data = df_comb)
+  lr <- lrtest(reduced_model, full_model)
+  patient_rand_vec <- c(patient_rand_vec, lr["2", "Pr(>Chisq)"])
+  n = n + 1
+  print(n)
+}
+
+df_cov <- as.data.frame(df_associations_BH)
+
+df_cov$patient_rand <- patient_rand_vec
+
+## add variance explained
+df_cov$perc_contrib <- eig.val[1:62, "variance.percent"]
+
+## reorder
+df_cov <- dplyr::select(df_cov, perc_contrib, everything())
+
+```
+
+## check for collinearity with variables of interest
+```{r}
+# set up df
+collinear <- matrix(ncol = 2, nrow = ncol(pca_scores_vectors))
+colnames(collinear) <- c("i.Specimen", "i.Disease")
+rownames(collinear) <- colnames(pca_scores_vectors)
+n = 1
+
+# run
+set.seed(123)
+for(i in colnames(pca_scores_vectors)){
+  spec_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Specimen + i.Sex + i.Age + i.OR.Age + p.LibraryConcentration_ngul + ex.Extractedby + s.SequencingBatch + ex.RINscore + (1 | i.PatientID)")), data = df_comb)
+  vif_spec <- vif(spec_model)
+  collinear[i, "i.Specimen"] <- vif_spec["i.Specimen", "GVIF^(1/(2*Df))"]
+  disease_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Disease + i.Sex + i.Age + i.OR.Age + p.LibraryConcentration_ngul + ex.Extractedby + s.SequencingBatch + ex.RINscore + (1 | i.PatientID)")), data = df_comb)
+  vif_disease <- vif(disease_model)
+  collinear[i, "i.Disease"] <- vif_disease["i.Disease", "GVIF^(1/(2*Df))"]
+  print(n)
+  n = n + 1
+}
+
+# and the variables in general
+cov_collinear <- matrix(nrow = 7, ncol = ncol(pca_scores_vectors))
+rownames(cov_collinear) <- c("i.Sex", "i.Age", "i.OR.Age", "p.LibraryConcentration_ngul", "ex.Extractedby", "s.SequencingBatch", "ex.RINscore")
+colnames(cov_collinear) <- colnames(pca_scores_vectors)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(pca_scores_vectors)){
+  cov_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.LibraryConcentration_ngul + ex.Extractedby + s.SequencingBatch + ex.RINscore + (1 | i.PatientID)")), data = df_comb)
+  vif_cov <- vif(cov_model)
+  cov_collinear[,i] <- vif_cov[,3]
+  print(n)
+  n = n + 1
+}
+
+## redo without possible problematic covariates
+cov_collinear_up <- matrix(nrow = 6, ncol = ncol(pca_scores_vectors))
+rownames(cov_collinear_up) <- c("i.Sex", "i.Age", "p.LibraryConcentration_ngul", "ex.Extractedby", "ex.RINscore", "s.SequencingBatch")
+colnames(cov_collinear_up) <- colnames(pca_scores_vectors)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(pca_scores_vectors)){
+  cov_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.LibraryConcentration_ngul + ex.Extractedby + ex.RINscore + s.SequencingBatch + (1 | i.PatientID)")), data = df_comb)
+  vif_cov <- vif(cov_model)
+  cov_collinear_up[,i] <- vif_cov[,3]
+  print(n)
+  n = n + 1
+}
+```
+
+## regress out
+```{r}
+counts_regress_prep <- as.data.frame(counts_pc_t)
+
+# make empty dataframe
+counts_regress <- matrix(ncol = ncol(counts_regress_prep), nrow = nrow(counts_regress_prep))
+
+colnames(counts_regress) <- colnames(counts_regress_prep)
+rownames(counts_regress) <- rownames(counts_regress_prep)
+
+# order metadata
+metadata_corr <- metadata_noNA
+metadata_corr <- metadata_corr[order(metadata_corr$p.LibraryID),]
+# check if lined up
+identical(rownames(counts_regress_prep), metadata_corr$p.LibraryID)
+# add variables
+counts_regress_prep$sex <- as.factor(metadata_corr$i.Sex)
+counts_regress_prep$age <- as.numeric(metadata_corr$i.Age)
+counts_regress_prep$lpconc <- as.numeric(metadata_corr$p.LibraryConcentration_ngul)
+counts_regress_prep$extractor <- as.factor(metadata_corr$ex.Extractedby)
+counts_regress_prep$RINscore <- as.numeric(metadata_corr$ex.RINscore)
+counts_regress_prep$sbatch <- as.factor(metadata_corr$s.SequencingBatch)
+counts_regress_prep$patientID <- as.factor(metadata_corr$i.PatientID)
+
+# run
+n = 1
+
+set.seed(123)
+for(i in colnames(counts_regress)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ sex + age + lpconc + extractor + RINscore + sbatch + (1 | patientID)")),  data=counts_regress_prep, control = lmerControl(optCtrl = list(maxfun = 1000000)))
+  counts_regress[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+```
+
+## check if OR.age correlated with removed covariates
+```{r}
+counts_check <- counts_regress
+set.seed(123)
+pca_check <- prcomp(counts_check)
+pca_check_scores <- as.data.frame(pca_check$x)
+eig.val_check <- get_eigenvalue(pca_check)
+
+# filter to PCs that explain at least 90% of variation
+pca_check_scores_PC40 <- pca_check_scores[, 1:40]
+
+# check order
+identical(rownames(pca_check_scores_PC40), metadata_noNA$p.LibraryID)
+
+# set up df for check
+df_comb_check <- cbind(pca_check_scores_PC40, metadata_noNA)
+
+# check for associations
+cov_check <- data.frame(matrix(ncol = 1, nrow = 40))
+rownames(cov_check) <- colnames(pca_check_scores_PC40)
+colnames(cov_check) <- c("i.OR.Age")
+
+set.seed(123)
+for(i in colnames(cov_check)){
+  for (j in rownames(cov_check)) {
+    print(as.formula(get(j) ~ get(i)))
+    obj <- print(lm(as.formula(get(j) ~ get(i)), data = df_comb_check))
+    cov_check[j,i] <- summary(obj)$coefficients[,"Pr(>|t|)"][[2]]
+  }
+}
+```
+
+

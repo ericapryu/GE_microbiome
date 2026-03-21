@@ -1,0 +1,61 @@
+---
+title: "star_output_stats"
+author: "Erica Ryu"
+date: "7/22/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# STAR output stats
+
+## The purpose is to analyze STAR output
+
+## import stats
+```{r}
+stats <- read.table("../output/full_star_stats.txt", sep = ";", header = TRUE, fill=TRUE)
+```
+
+## import libraries
+```{r}
+library(tibble)
+library(ggplot2)
+library(tidyr)
+```
+
+## format table
+```{r}
+stats <- column_to_rownames(stats, var = "X")
+
+# remove non-sample columns
+stats <- stats[, !(colnames(stats) %in% c("X.1"))]
+
+# transpose
+stats_t <- as.data.frame(t(stats))
+```
+
+## STAR stats
+```{r}
+stats_t$'Number of input reads' <- as.numeric(as.character(stats_t$'Number of input reads'))
+stats_t$'Uniquely mapped reads number' <- as.numeric(as.character(stats_t$'Uniquely mapped reads number'))
+stats_t$'Number of splices: Total' <- as.numeric(as.character(stats_t$'Number of splices: Total'))
+stats_t$'Number of splices: Annotated (sjdb)' <- as.numeric(as.character(stats_t$'Number of splices: Annotated (sjdb)'))
+
+# input number of reads
+avg_inp <- mean(stats_t$"Number of input reads")
+range(stats_t$"Number of input reads")
+
+# avg uniquely mapped reads, map rate, percent splices
+avg_map <- mean(stats_t$"Uniquely mapped reads number")
+range(stats_t$"Uniquely mapped reads number")
+
+# percent mapped uniquely
+(avg_map/avg_inp)*100
+
+# avg percent of splices
+mean_total_splice <- mean(stats_t$"Number of splices: Total")
+mean_anno_splice <- mean(stats_t$"Number of splices: Annotated (sjdb)")
+(mean_anno_splice/mean_total_splice)*100
+```

@@ -1,0 +1,64 @@
+---
+title: "qiime_to_phyloseq"
+author: "Erica Ryu"
+date: "4/24/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 6. Qiime2 to Phyloseq
+
+## The purpose is to import Qiime2 objects into phyloseq
+
+## load packages
+```{r}
+library(qiime2R)
+library(tibble)
+library(phyloseq)
+```
+
+## load in objects
+```{r}
+asv_table <- read_qza("../../2.infer_ASVs/output/5.table-deblur.qza")
+tax_table <- read_qza("../../2.infer_ASVs/output/7.taxonomy-deblur.qza")
+tree <- read_qza("../../2.infer_ASVs/output/6.rooted-tree-deblur.qza")
+metadata <- read.table("../data/Gut_microbiome_metadata.tsv", sep = "\t", header = TRUE, comment.char = "", row.names = 1)
+```
+
+## generate phyloseq object
+```{r}
+# fix taxa table formatting
+tax <- as.matrix(parse_taxonomy(tax_table$data))
+
+# fix asv_table formatting
+asv <- as.data.frame(t(asv_table$data))
+
+# run the lines below to remove sequences without metadata and metadata without sequences
+asv[(rownames(asv) %in% metadata$s.SequencingID),] -> asv
+metadata[(metadata$s.SequencingID %in% rownames(asv)),]-> metadata
+#this should now be TRUE
+all(rownames(asv) %in% metadata$s.SequencingID)
+
+# transform back to matrix for phyloseq
+asv <- as.matrix(asv)
+
+ps <- phyloseq(otu_table(as.matrix(asv), taxa_are_rows = FALSE), 
+               sample_data(metadata),
+               phy_tree(tree$data),
+               tax_table(tax)
+)
+```
+
+## remove singletons
+```{r}
+# manually removing singletons in phyloseq now due to limitations in deblur settings
+ps_wo_singleton <- filter_taxa(ps, function (x) {sum(x > 0) > 1}, prune=TRUE)
+```
+
+## save object
+```{r}
+saveRDS(ps_wo_singleton, file = "../output/Hershey_ps.rds")
+```

@@ -1,0 +1,489 @@
+---
+title: "microbiome_characterization"
+author: "Erica Ryu"
+date: "8/31/2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 5. Microbiome Characterization
+
+## The purpose of this script is to examine standard microbiome characteristics (alpha and beta diversity)
+
+## load packages
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(ggsignif)
+library(FSA)
+library(vegan)
+library(dplyr)
+library(car)
+library(lme4)
+library(ape)
+library(pairwiseAdonis)
+```
+
+## load data
+```{r}
+phyloseq <- readRDS("../output/phyloseq_sampleReads_unadj.rds")
+rfxn <- read.csv("../output/rfxn_uncorrect.csv", header = TRUE)
+```
+
+## load functions
+```{r}
+# calculate beta diversity
+beta_ordinate <- function(physeq, beta_dist){
+  # set up data
+  ps.prop <- transform_sample_counts(physeq, function(otu) otu/sum(otu))
+  ps.prop@otu_table <- na.omit(ps.prop@otu_table)
+  beta_inp <- t(as(otu_table(ps.prop), "matrix"))
+  ## calculate distance and ordinate
+  if (beta_dist == "unweighted unifrac") {
+    dist <- rbiom::unifrac(beta_inp, weighted = FALSE, tree = ps.prop@phy_tree)
+    return(pcoa(dist))
+  } else if (beta_dist == "weighted unifrac") {
+    dist <- rbiom::unifrac(beta_inp, weighted = TRUE, tree = ps.prop@phy_tree)
+    return(pcoa(dist))
+  } else {
+    ord.pcoa <- ordinate(ps.prop, method = "PCoA", distance = "bray", weighted = FALSE)
+  }
+}
+
+# set up beta diversity data for plotting
+plot_beta_disease <- function(beta, physeq){
+  # extract axes
+  PCOAaxes <- beta$vectors[,c(1,2,3,4)]
+  # extract lifestyle column from metadata and add to vectors
+  disease <- physeq@sam_data$i.Disease
+  PCOAaxes_meta <- cbind(PCOAaxes, disease)
+  df_PCOA<- as.data.frame(as.matrix(PCOAaxes_meta))
+  return(df_PCOA)
+}
+
+plot_beta_specimen <- function(beta, physeq){
+  # extract axes
+  PCOAaxes <- beta$vectors[,c(1,2,3,4)]
+  # extract lifestyle column from metadata and add to vectors
+  specimen <- physeq@sam_data$i.Specimen
+  PCOAaxes_meta <- cbind(PCOAaxes, specimen)
+  df_PCOA<- as.data.frame(as.matrix(PCOAaxes_meta))
+  return(df_PCOA)
+}
+
+```
+
+## set colors
+```{r}
+threecolors <- c("#1E88E5", "#D55E00", "#CC79A7")
+twocolors <- c("#332288", "#52BD0C")
+```
+
+## examine alpha diversity
+```{r}
+# specimen
+alpha_spec <- subset(rfxn, i.Disease != "ColorectalCancer")
+
+alpha_spec$ex.ExtractionBatch <- as.factor(alpha_spec$ex.ExtractionBatch)
+alpha_spec$i.Sex <- as.factor(alpha_spec$i.Sex)
+alpha_spec$i.Age <- as.numeric(alpha_spec$i.Age)
+alpha_spec$p.CleanedPCRConcentration <- as.numeric(alpha_spec$p.CleanedPCRConcentration)
+alpha_spec$i.PatientID <- as.factor(alpha_spec$i.PatientID)
+
+shannon_spec <- subset(alpha_spec, measure == "Shannon")
+rich_spec <- subset(alpha_spec, measure == "Richness")
+simpson_spec <- subset(alpha_spec, measure == "Simpson")
+fisher_spec <- subset(alpha_spec, measure == "Fisher")
+faiths_spec <- subset(alpha_spec, measure == "Faiths")
+
+## set up df
+spec_df <- as.data.frame(matrix(nrow = nrow(rich_spec), ncol = 7))
+colnames(spec_df) <- c("seqID", "specimen", "Shannon", "Richness", "Simpson", "Fisher", "Faiths")
+spec_df$seqID <- shannon_spec$s.SequencingID
+spec_df$specimen <- shannon_spec$i.Specimen
+
+## correct for covariates
+shannon_spec_lmm <- lmer(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID),  data=shannon_spec)
+spec_df$Shannon <- resid(shannon_spec_lmm)
+
+rich_spec_lmm <- lmer(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID),  data=rich_spec)
+spec_df$Richness <- resid(rich_spec_lmm)
+
+simpson_spec_lmm <- lmer(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID),  data=simpson_spec)
+spec_df$Simpson <- resid(simpson_spec_lmm)
+
+fisher_spec_lmm <- lmer(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID),  data=fisher_spec)
+spec_df$Fisher <- resid(fisher_spec_lmm)
+
+faiths_spec_lmm <- lmer(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID),  data=faiths_spec)
+spec_df$Faiths <- resid(faiths_spec_lmm)
+
+## calculate significance
+shannon_aov <- aov(Shannon ~ specimen, data = spec_df)
+richness_aov <- aov(Richness ~ specimen, data = spec_df)
+simpson_aov <- aov(Simpson ~ specimen, data = spec_df)
+fisher_aov <- aov(Fisher ~ specimen, data = spec_df)
+faiths_aov <- aov(Faiths ~ specimen, data = spec_df)
+
+summary(shannon_aov)
+summary(richness_aov)
+summary(simpson_aov)
+summary(fisher_aov)
+summary(faiths_aov)
+
+vec <- c(summary(shannon_aov)[[1]][["Pr(>F)"]][1], summary(richness_aov)[[1]][["Pr(>F)"]][1], summary(simpson_aov)[[1]][["Pr(>F)"]][1], summary(fisher_aov)[[1]][["Pr(>F)"]][1], summary(faiths_aov)[[1]][["Pr(>F)"]][1])
+adjustp_alpha <- p.adjust(vec, method = "BH", n = 5)
+
+
+# disease
+alpha_disease <- subset(rfxn, i.Specimen == "Right Colon")
+
+
+shannon_disease <- subset(alpha_disease, measure == "Shannon")
+rich_disease <- subset(alpha_disease, measure == "Richness")
+simpson_disease <- subset(alpha_disease, measure == "Simpson")
+fisher_disease <- subset(alpha_disease, measure == "Fisher")
+faiths_disease <- subset(alpha_disease, measure == "Faiths")
+
+## set up df
+disease_df <- as.data.frame(matrix(nrow = nrow(rich_disease), ncol = 7))
+colnames(disease_df) <- c("seqID", "disease", "Shannon", "Richness", "Simpson", "Fisher", "Faiths")
+disease_df$seqID <- shannon_disease$s.SequencingID
+disease_df$disease <- shannon_disease$i.Disease
+
+## correct for covariates
+shannon_disease_lm <- lm(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch,  data=shannon_disease)
+disease_df$Shannon <- resid(shannon_disease_lm)
+
+rich_disease_lm <- lm(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch,  data=rich_disease)
+disease_df$Richness <- resid(rich_disease_lm)
+
+simpson_disease_lm <- lm(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch,  data=simpson_disease)
+disease_df$Simpson <- resid(simpson_disease_lm)
+
+fisher_disease_lm <- lm(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch,  data=fisher_disease)
+disease_df$Fisher <- resid(fisher_disease_lm)
+
+faiths_disease_lm <- lm(mean ~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch,  data=faiths_disease)
+disease_df$Faiths <- resid(faiths_disease_lm)
+
+## calculate significance
+summary(aov(Shannon ~ disease, data = disease_df))
+summary(aov(Richness ~ disease, data = disease_df))
+summary(aov(Simpson ~ disease, data = disease_df))
+summary(aov(Fisher ~ disease, data = disease_df))
+summary(aov(Faiths ~ disease, data = disease_df))
+```
+
+## plot alpha diversity
+```{r}
+# specimen
+alpha_spec_faiths_plot <- ggplot(spec_df, aes(x = specimen, y = Faiths, group = specimen), color = black) +
+  geom_violin(aes(fill=specimen), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  scale_fill_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  geom_jitter(size = 1, width=0.15, col="#4A4A4A", alpha=0.8) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "corrected Faith's PD")
+
+ggsave(file="../figures/alpha_spec_faiths_plot.pdf", plot=alpha_spec_faiths_plot, width=2.5, height=4)
+
+
+alpha_spec_shannon_plot <- ggplot(spec_df, aes(x = specimen, y = Shannon, group = specimen), color = black) +
+  geom_violin(aes(fill=specimen), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  scale_fill_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  geom_jitter(size = 1, width=0.15, col="#4A4A4A") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "corrected Shannon Alpha")
+
+ggsave(file="../figures/alpha_spec_shannon_plot.pdf", plot=alpha_spec_shannon_plot, width=2.5, height=4)
+
+
+alpha_spec_rich_plot <- ggplot(spec_df, aes(x = specimen, y = Richness, group = specimen), color = black) +
+  geom_violin(aes(fill=specimen), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  scale_fill_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  geom_jitter(size = 1, width=0.15, col="#4A4A4A") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "corrected Richness")
+
+ggsave(file="../figures/alpha_spec_rich_plot.pdf", plot=alpha_spec_rich_plot, width=2.5, height=4)
+
+
+# disease
+alpha_disease_faiths_plot <- ggplot(disease_df, aes(x = disease, y = Faiths, group = disease), color = black) +
+  geom_violin(aes(fill=disease), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("Crohns", "ColorectalCancer")) +
+  scale_fill_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "ColorectalCancer"),
+                    labels=c("Crohn's Disease", "Colorectal Cancer")) +
+  geom_jitter(size = 1, width=0.15, col="#4A4A4A") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "corrected Faith's PD")
+
+ggsave(file="../figures/alpha_disease_faiths_plot.pdf", plot=alpha_disease_faiths_plot, width=2.5, height=4)
+
+
+alpha_disease_shannon_plot <- ggplot(disease_df, aes(x = disease, y = Shannon, group = disease), color = black) +
+  geom_violin(aes(fill=disease), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("Crohns", "ColorectalCancer")) +
+  scale_fill_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "ColorectalCancer"),
+                    labels=c("Crohn's Disease", "Colorectal Cancer")) +
+  geom_jitter(size = 1, width=0.15, col="#4A4A4A") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "corrected Shannon Alpha")
+
+ggsave(file="../figures/alpha_disease_shannon_plot.pdf", plot=alpha_disease_shannon_plot, width=2.5, height=4)
+
+
+alpha_disease_rich_plot <- ggplot(disease_df, aes(x = disease, y = Richness, group = disease), color = black) +
+  geom_violin(aes(fill=disease), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("Crohns", "ColorectalCancer")) +
+  scale_fill_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "ColorectalCancer"),
+                    labels=c("Crohn's Disease", "Colorectal Cancer")) +
+  geom_jitter(size = 1, width=0.15, col="#4A4A4A") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "corrected Richness")
+
+ggsave(file="../figures/alpha_disease_rich_plot.pdf", plot=alpha_disease_rich_plot, width=2.5, height=4)
+```
+
+## examine beta diversity
+```{r}
+# specimen
+bray_spec <- subset_samples(phyloseq, i.Disease != "ColorectalCancer")
+
+bray_ordinate_spec <- beta_ordinate(bray_spec, beta_dist = "bray")
+bray_plot_specimen <- plot_beta_specimen(bray_ordinate_spec, bray_spec)
+
+## correct for covariates
+bray_spec_corr <- as.data.frame(matrix(nrow = nrow(bray_plot_specimen), ncol = 4))
+
+colnames(bray_spec_corr) <- c("Axis.1", "Axis.2", "Axis.3", "Axis.4")
+
+### check order
+identical(bray_spec@sam_data$s.SequencingID, rownames(bray_plot_specimen))
+
+### add variable
+bray_plot_specimen$i.Sex <- as.factor(bray_spec@sam_data$i.Sex)
+bray_plot_specimen$i.Age <- as.numeric(bray_spec@sam_data$i.Age)
+bray_plot_specimen$ex.ExtractionBatch <- as.factor(bray_spec@sam_data$ex.ExtractionBatch)
+bray_plot_specimen$p.CleanedPCRConcentration <- as.numeric(bray_spec@sam_data$p.CleanedPCRConcentration)
+bray_plot_specimen$i.PatientID <- as.factor(bray_spec@sam_data$i.PatientID)
+
+### fix classes
+bray_plot_specimen$Axis.1 <- as.numeric(bray_plot_specimen$Axis.1)
+bray_plot_specimen$Axis.2 <- as.numeric(bray_plot_specimen$Axis.2)
+bray_plot_specimen$Axis.3 <- as.numeric(bray_plot_specimen$Axis.3)
+bray_plot_specimen$Axis.4 <- as.numeric(bray_plot_specimen$Axis.4)
+
+n = 1
+
+for(i in colnames(bray_spec_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")),  data = bray_plot_specimen)
+  bray_spec_corr[, i] <- resid(obj)
+  print(n)
+  n = n + 1
+}
+
+bray_spec_corr$specimen <- bray_plot_specimen$specimen
+
+bray_spec_plot <- ggplot(bray_spec_corr, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) +
+  geom_point(shape = 21, color = "black", size = 3, aes(fill = specimen)) +
+  scale_x_continuous(breaks=seq(-1,1,0.1)) +
+  scale_y_continuous(breaks=seq(-1,1,0.05)) +
+  scale_fill_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  stat_ellipse(level = 0.7, aes(x=as.numeric(Axis.1), y = as.numeric(Axis.2), color = specimen), type = "norm") +
+  scale_color_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  labs(x = "PCoA1 (7.03%)",
+       y = "PCoA2 (5.9%)")
+
+ggsave(file="../figures/beta_spec_plot.pdf", plot=bray_spec_plot, width=6, height=4)
+
+
+# disease
+bray_disease <- subset_samples(phyloseq, i.Specimen == "Right Colon")
+
+bray_ordinate_disease <- beta_ordinate(bray_disease, beta_dist = "bray")
+bray_plot_disease <- plot_beta_disease(bray_ordinate_disease, bray_disease)
+
+## correct for covariates
+bray_disease_corr <- as.data.frame(matrix(nrow = nrow(bray_plot_disease), ncol = 4))
+
+colnames(bray_disease_corr) <- c("Axis.1", "Axis.2", "Axis.3", "Axis.4")
+
+### check order
+identical(bray_disease@sam_data$s.SequencingID, rownames(bray_plot_disease))
+
+### add variable
+bray_plot_disease$i.Sex <- as.factor(bray_disease@sam_data$i.Sex)
+bray_plot_disease$i.Age <- as.numeric(bray_disease@sam_data$i.Age)
+bray_plot_disease$ex.ExtractionBatch <- as.factor(bray_disease@sam_data$ex.ExtractionBatch)
+bray_plot_disease$p.CleanedPCRConcentration <- as.numeric(bray_disease@sam_data$p.CleanedPCRConcentration)
+
+### fix classes
+bray_plot_disease$Axis.1 <- as.numeric(bray_plot_disease$Axis.1)
+bray_plot_disease$Axis.2 <- as.numeric(bray_plot_disease$Axis.2)
+bray_plot_disease$Axis.3 <- as.numeric(bray_plot_disease$Axis.3)
+bray_plot_disease$Axis.4 <- as.numeric(bray_plot_disease$Axis.4)
+
+n = 1
+
+for(i in colnames(bray_disease_corr)){
+  obj <- lm(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")),  data = bray_plot_disease)
+  bray_disease_corr[, i] <- resid(obj)
+  print(n)
+  n = n + 1
+}
+
+bray_disease_corr$disease <- bray_plot_disease$disease
+
+bray_disease_plot <- ggplot(bray_disease_corr, aes(x = as.numeric(Axis.1), y = as.numeric(Axis.2))) +
+  geom_point(shape = 24, color = "black", size = 3, aes(fill = disease)) +
+  scale_x_continuous(breaks=seq(-1,1,0.1)) +
+  scale_y_continuous(breaks=seq(-1,1,0.1)) +
+  scale_fill_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "ColorectalCancer"),
+                    labels=c("Crohns", "Colorectal Cancer"))+
+   stat_ellipse(level = 0.7, aes(x=as.numeric(Axis.1), y = as.numeric(Axis.2), color = disease), type = "norm") +
+  scale_color_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "ColorectalCancer"),
+                    labels=c("Crohns", "Colorectal Cancer"))+
+  labs(x = "PCoA1 (7.86%)",
+       y = "PCoA2 (5.66%)")
+
+ggsave(file="../figures/beta_disease_plot.pdf", plot=bray_disease_plot, width=6, height=4)
+```
+
+## permanova
+```{r}
+# specimen
+## prep data
+df_spec <- data.frame(sample_data(bray_spec))
+dist_bray_spec <- phyloseq::distance(bray_spec, method="bray", normalized=TRUE, parallel=FALSE, fast=TRUE)
+
+h3 <-
+  how(within = Within(type = "free"),
+      plots = Plots(type = "none"),
+      blocks = df_spec$i.PatientID,
+      nperm = 99999)
+  
+## run
+set.seed(105)
+adonis2(dist_bray_spec ~ i.Specimen + i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch, data = df_spec, permutations = h3, by = "margin")
+
+pairwise.adonis2(dist_bray_spec ~ i.Specimen + i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch, data = df_spec, strata = "i.PatientID")
+
+# disease
+## prep data
+df_disease <- data.frame(sample_data(bray_disease))
+dist_bray_disease <- phyloseq::distance(bray_disease, method="bray", normalized=TRUE, parallel=FALSE, fast=TRUE) 
+
+## run
+set.seed(105)
+adonis2(dist_bray_disease ~ i.Disease + i.Sex + i.Age + ex.ExtractionBatch + p.CleanedPCRConcentration, data = df_disease, permutations = 99999, by = "margin")
+```
+
+## check for variation within individual - prep
+```{r}
+bray_spec_RA <- transform_sample_counts(bray_spec, function(otu) otu/sum(otu))
+bray_spec_RA@otu_table <- na.omit(bray_spec_RA@otu_table)
+bray_spec_RA_input <- as(otu_table(bray_spec_RA), "matrix")
+bray_spec_RA_input <- as.data.frame(bray_spec_RA_input)
+
+# Prepare for correlation
+bray_corr <- matrix(ncol = ncol(bray_spec_RA_input), nrow = nrow(bray_spec_RA_input))
+colnames(bray_corr) <- colnames(bray_spec_RA_input)
+rownames(bray_corr) <- rownames(bray_spec_RA_input)
+  
+# Get sample data
+bray_sam <- as.data.frame(as.matrix(bray_spec@sam_data))
+  
+# Add variables
+bray_spec_RA_input$PCRconc <- as.numeric(bray_sam$p.CleanedPCRConcentration)
+bray_spec_RA_input$exbatch <- as.factor(bray_sam$ex.ExtractionBatch)
+bray_spec_RA_input$sex <- as.factor(bray_sam$i.Sex)
+bray_spec_RA_input$age <- as.numeric(bray_sam$i.Age)
+bray_spec_RA_input$spec <- as.factor(bray_sam$i.Specimen)
+  
+# Run linear models
+set.seed(123)
+for(i in colnames(bray_corr)){
+  obj <- lm(as.formula(paste0("`", i, "`", "~ PCRconc + exbatch + sex + age + spec")),  
+              data = bray_spec_RA_input)
+  bray_corr[,i] <- resid(obj)
+}
+
+# Convert to dataframe
+bray_corr <- as.data.frame(bray_corr)
+```
+
+## compare variation within individual
+```{r}
+micro_indiv_dist <- dist(bray_corr)
+micro_indiv_df <- reshape2::melt(as.matrix(micro_indiv_dist), varnames = c("row", "col"))
+micro_indiv_df <- micro_indiv_df[micro_indiv_df$value != 0,]
+
+micro_indiv_df$row <- bray_sam$i.PatientID[match(micro_indiv_df$row, bray_sam$s.SequencingID)]
+micro_indiv_df$col <- bray_sam$i.PatientID[match(micro_indiv_df$col, bray_sam$s.SequencingID)]
+
+micro_indiv_df$sort <- ifelse(micro_indiv_df$row == micro_indiv_df$col, "same", "different")
+
+# calculate significance
+indiv_aov <- aov(value ~ sort, data = micro_indiv_df)
+summary(indiv_aov)
+
+# plot
+micro_intra <- ggplot(micro_indiv_df, aes(x = sort, y = value, group = sort), color = black) +
+  geom_violin(aes(fill = sort), alpha=0.8) +
+  geom_boxplot(width=0.1, color="black", alpha=0.2, outlier.shape = NA) +
+  scale_x_discrete(limits=c("same", "different")) +
+  scale_fill_manual(name=NULL,
+                    values=c("black", "red"),
+                    breaks=c("same", "different"),
+                    labels=c("Intra", "Inter")) +
+  theme(axis.title.x = element_blank(), axis.title.y = element_text(angle = 90, vjust = 0.5)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  theme(legend.position = "none") + labs(x = "", y = "Distance", title = "Microbiome")
+
+ggsave(file = "../figures/micro_intra.pdf", plot = micro_intra, width = 7, height = 4)
+```
+

@@ -1,0 +1,876 @@
+---
+title: "9.0.additional_QC"
+author: "Erica Ryu"
+date: "8/30/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 9. Additional QC
+
+## The purpose of this script is to conduct additional QC of the microbiome data and check covariates
+
+## load packages
+```{r}
+library(phyloseq)
+library(data.table)
+# library(sva)
+library(picante)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(ape)
+library(lmtest)
+library(car)
+library(tidyr)
+```
+
+## load in objects
+```{r}
+phyloseq <- readRDS("../output/Hershey_ps_noncontam.rds")
+NOD2 <- read.csv("../data/TI_NOD2_samples_withSNPcalls.csv", header = TRUE)
+```
+
+## load functions
+```{r}
+# calculate beta diversity
+beta_ordinate <- function(physeq, beta_dist){
+  # set up data
+  ps.prop <- transform_sample_counts(physeq, function(otu) otu/sum(otu))
+  ps.prop@otu_table <- na.omit(ps.prop@otu_table)
+  beta_inp <- t(as(otu_table(ps.prop), "matrix"))
+  ## calculate distance and ordinate
+  if (beta_dist == "unweighted unifrac") {
+    dist <- rbiom::unifrac(beta_inp, weighted = FALSE, tree = ps.prop@phy_tree)
+    return(pcoa(dist))
+  } else if (beta_dist == "weighted unifrac") {
+    dist <- rbiom::unifrac(beta_inp, weighted = TRUE, tree = ps.prop@phy_tree)
+    return(pcoa(dist))
+  } else {
+    ord.pcoa <- ordinate(ps.prop, method = "PCoA", distance = "bray", weighted = FALSE)
+  }
+}
+```
+
+## set colors
+```{r}
+threecolors <- c("#1E88E5", "#D55E00", "#CC79A7")
+twocolors <- c("#332288", "#52BD0C")
+```
+
+## remove controls
+```{r}
+phyloseq <- subset_samples(phyloseq, p.SampleType == "sample")
+```
+
+## prevalence filtering
+```{r}
+phyloseq_prunetaxa <- filter_taxa(phyloseq, function(x) sum(x > 5) >= 2, TRUE)
+```
+
+## remove chloroplasts
+```{r}
+phyloseq_prunetaxa <- subset_taxa(phyloseq_prunetaxa, Order!="Chloroplast")
+```
+
+## examine read depth across all samples
+```{r}
+reads <- data.table(as(sample_data(phyloseq_prunetaxa), "data.frame"),
+                 TotalReads = sample_sums(phyloseq_prunetaxa), keep.rownames = TRUE)
+
+reads_specimen <- subset(reads, i.Disease == "Crohns")
+reads_disease <- subset(reads, i.Specimen == "Right Colon")
+
+spec_readdepth <- ggplot(reads_specimen, aes(x = reorder(s.SequencingID, TotalReads), y=TotalReads, fill=i.Specimen)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 65466, linetype="dashed") +
+  scale_fill_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  labs(title = "Specimen read counts",
+       x = "samples", 
+       y = "reads") +
+  # scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  # ylim(0,95000)+
+  theme(axis.text.x = element_blank())
+
+ggsave(file = "../figures/spec_reads.pdf", plot = spec_readdepth, width = 7, height = 4)
+
+disease_readdepth <- ggplot(reads_disease, aes(x = reorder(s.SequencingID, TotalReads), y=TotalReads, fill=i.Disease)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = 65466, linetype="dashed") +
+  scale_fill_manual(name=NULL,
+                    values=twocolors,
+                    breaks=c("Crohns", "ColorectalCancer"),
+                    labels=c("Crohns", "ColorectalCancer"))+
+  labs(title = "Disease read counts",
+       x = "samples", 
+       y = "reads") +
+  # scale_y_continuous(expand = expansion(mult = c(0, .1))) +
+  # ylim(0,95000)+
+  theme(axis.text.x = element_blank())
+
+ggsave(file = "../figures/disease_reads.pdf", plot = disease_readdepth, width = 7, height = 4)
+
+# list samples below 65467
+reads_filt <- subset(reads, TotalReads < 65467)
+reads_filt_ID <- reads_filt$s.SequencingID
+```
+
+## filter out samples below set read count
+```{r}
+phyloseq_sampleReads <- prune_samples(!(sample_names(phyloseq_prunetaxa) %in%reads_filt_ID), phyloseq_prunetaxa)
+
+# remove taxa with zero abundance
+phyloseq_sampleReads <- prune_taxa(taxa_sums(phyloseq_sampleReads)>0, phyloseq_sampleReads)
+```
+
+## how many samples per group left after QC?
+```{r}
+df.mat <- as.matrix(phyloseq_sampleReads@sam_data) # Put sample_data into a ggplot-friendly data.frame
+df.mat <- as.data.frame(df.mat)
+
+# subset 
+df.mat.disease <- subset(df.mat, i.Specimen == "Right Colon") 
+df.mat.location <- subset(df.mat, i.Disease == "Crohns") 
+
+df_disease <- df.mat.disease[, c("i.Disease"), drop=FALSE]
+df_location <- df.mat.location[,c("i.Specimen"), drop=FALSE]
+
+# how many samples per condition?
+dplyr::count(df_disease, i.Disease)
+dplyr::count(df_location, i.Specimen)
+```
+
+## save ps object
+```{r}
+saveRDS(phyloseq_sampleReads, "../output/phyloseq_sampleReads_unadj.rds")
+```
+
+## check for significant associations
+```{r}
+# bray curtis
+set.seed(123)
+bray_pcoa <- beta_ordinate(phyloseq_sampleReads, beta_dist = "bray")
+bray_eig <- bray_pcoa[["values"]][["Relative_eig"]]
+bray_eig <- as.data.frame(bray_eig)
+bray_eig$cumulative <- cumsum(bray_eig$bray_eig)
+### 90% of variation  is first 77 PCOs
+
+## extract vectors
+bray_vec <- bray_pcoa[["vectors"]]
+
+## filter to PCs that explain at least 90% of variation
+bray_PCOs <- 1:77
+bray_PCOs <- paste0('Axis.', bray_PCOs)
+
+bray_vec <- bray_vec[, bray_PCOs]
+
+## remove metadata columns with NA
+metadata_ps <- sample_data(phyloseq_sampleReads)
+
+## set up df for check
+df_comb_bray <- cbind(bray_vec, metadata_ps)
+
+## set class types
+df_comb_bray$i.Sex <- as.factor(df_comb_bray$i.Sex)
+df_comb_bray$i.Age <- as.numeric(df_comb_bray$i.Age)
+df_comb_bray$i.OR.Age <- as.numeric(df_comb_bray$i.OR.Age)
+df_comb_bray$p.CleanedPCRConcentration <- as.numeric(df_comb_bray$p.CleanedPCRConcentration)
+df_comb_bray$ex.ExtractionBatch <- as.factor(df_comb_bray$ex.ExtractionBatch)
+
+## check if lined up
+identical(rownames(metadata_ps), rownames(bray_vec))
+
+## check for associations
+df_associations_bray <- matrix(ncol = 5, nrow = ncol(bray_vec))
+colnames(df_associations_bray) <- c("i.Sex", "i.Age", "i.OR.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch")
+rownames(df_associations_bray) <- colnames(bray_vec)
+
+set.seed(123)
+for(i in colnames(df_associations_bray)){
+  for (j in rownames(df_associations_bray)) {
+    print(as.formula(get(j) ~ get(i)))
+    obj <- print(lm(as.formula(get(j) ~ get(i)), data = df_comb_bray))
+    df_associations_bray[j,i] <- summary(obj)$coefficients[,"Pr(>|t|)"][[2]]
+  }
+}
+
+df_associations_bray_BH <- as.data.frame(t(df_associations_bray))
+
+## multiple test correction
+set.seed(123)
+df_associations_bray_BH <- sapply(df_associations_bray_BH, p.adjust, method="BH", n = 5)
+df_associations_bray_BH <- t(df_associations_bray_BH)
+colnames(df_associations_bray_BH) <- colnames(df_associations_bray)
+## add variance explained
+df_cov_bray <- as.data.frame(df_associations_bray_BH)
+df_cov_bray$perc_contrib <- bray_eig[1:77, "bray_eig"]
+
+## reorder
+df_cov_bray <- dplyr::select(df_cov_bray, perc_contrib, everything())
+
+# unweighted unifrac
+set.seed(123)
+uw_pcoa <- beta_ordinate(phyloseq_sampleReads, beta_dist = "unweighted unifrac")
+uw_eig <- uw_pcoa[["values"]][["Relative_eig"]]
+uw_eig <- as.data.frame(uw_eig)
+uw_eig$cumulative <- cumsum(uw_eig$uw_eig)
+### 90% of variation  is first 67 PCOs
+
+## extract vectors
+uw_vec <- uw_pcoa[["vectors"]]
+
+## filter to PCs that explain at least 90% of variation
+uw_PCOs <- 1:67
+uw_PCOs <- paste0('Axis.', uw_PCOs)
+
+uw_vec <- uw_vec[, uw_PCOs]
+
+## remove metadata columns with NA
+metadata_ps <- sample_data(phyloseq_sampleReads)
+
+## set up df for check
+df_comb_uw <- cbind(uw_vec, metadata_ps)
+
+## set class types
+df_comb_uw$i.Sex <- as.factor(df_comb_uw$i.Sex)
+df_comb_uw$i.Age <- as.numeric(df_comb_uw$i.Age)
+df_comb_uw$i.OR.Age <- as.numeric(df_comb_uw$i.OR.Age)
+df_comb_uw$p.CleanedPCRConcentration <- as.numeric(df_comb_uw$p.CleanedPCRConcentration)
+df_comb_uw$ex.ExtractionBatch <- as.factor(df_comb_uw$ex.ExtractionBatch)
+
+## check if lined up
+identical(rownames(metadata_ps), rownames(uw_vec))
+
+## check for associations
+df_associations_uw <- matrix(ncol = 5, nrow = ncol(uw_vec))
+colnames(df_associations_uw) <- c("i.Sex", "i.Age", "i.OR.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch")
+rownames(df_associations_uw) <- colnames(uw_vec)
+
+set.seed(123)
+for(i in colnames(df_associations_uw)){
+  for (j in rownames(df_associations_uw)) {
+    print(as.formula(get(j) ~ get(i)))
+    obj <- print(lm(as.formula(get(j) ~ get(i)), data = df_comb_uw))
+    df_associations_uw[j,i] <- summary(obj)$coefficients[,"Pr(>|t|)"][[2]]
+  }
+}
+
+df_associations_uw_BH <- as.data.frame(t(df_associations_uw))
+
+## multiple test correction
+set.seed(123)
+df_associations_uw_BH <- sapply(df_associations_uw_BH, p.adjust, method="BH", n = 5)
+df_associations_uw_BH <- t(df_associations_uw_BH)
+colnames(df_associations_uw_BH) <- colnames(df_associations_uw)
+## add variance explained
+df_cov_uw <- as.data.frame(df_associations_uw_BH)
+df_cov_uw$perc_contrib <- uw_eig[1:67, "uw_eig"]
+
+## reorder
+df_cov_uw <- dplyr::select(df_cov_uw, perc_contrib, everything())
+
+
+# weighted unifrac
+set.seed(123)
+w_pcoa <- beta_ordinate(phyloseq_sampleReads, beta_dist = "weighted unifrac")
+w_eig <- w_pcoa[["values"]][["Relative_eig"]]
+w_eig <- as.data.frame(w_eig)
+w_eig$cumulative <- cumsum(w_eig$w_eig)
+### 90% of variation  is first 63 PCOs
+
+## extract vectors
+w_vec <- w_pcoa[["vectors"]]
+
+## filter to PCs that explain at least 90% of variation
+w_PCOs <- 1:18
+w_PCOs <- paste0('Axis.', w_PCOs)
+
+w_vec <- w_vec[, w_PCOs]
+
+## remove metadata columns with NA
+metadata_ps <- sample_data(phyloseq_sampleReads)
+
+## set up df for check
+df_comb_w <- cbind(w_vec, metadata_ps)
+
+## set class types
+df_comb_w$i.Sex <- as.factor(df_comb_w$i.Sex)
+df_comb_w$i.Age <- as.numeric(df_comb_w$i.Age)
+df_comb_w$i.OR.Age <- as.numeric(df_comb_w$i.OR.Age)
+df_comb_w$p.CleanedPCRConcentration <- as.numeric(df_comb_w$p.CleanedPCRConcentration)
+df_comb_w$ex.ExtractionBatch <- as.factor(df_comb_w$ex.ExtractionBatch)
+
+## check if lined up
+identical(rownames(metadata_ps), rownames(w_vec))
+
+
+## check for associations
+df_associations_w <- matrix(ncol = 5, nrow = ncol(w_vec))
+colnames(df_associations_w) <- c("i.Sex", "i.Age", "i.OR.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch")
+rownames(df_associations_w) <- colnames(w_vec)
+
+set.seed(123)
+for(i in colnames(df_associations_w)){
+  for (j in rownames(df_associations_w)) {
+    print(as.formula(get(j) ~ get(i)))
+    obj <- print(lm(as.formula(get(j) ~ get(i)), data = df_comb_w))
+    df_associations_w[j,i] <- summary(obj)$coefficients[,"Pr(>|t|)"][[2]]
+  }
+}
+
+df_associations_w_BH <- as.data.frame(t(df_associations_w))
+
+## multiple test correction
+set.seed(123)
+df_associations_w_BH <- sapply(df_associations_w_BH, p.adjust, method="BH", n = 5)
+df_associations_w_BH <- t(df_associations_w_BH)
+colnames(df_associations_w_BH) <- colnames(df_associations_w)
+## add variance explained
+df_cov_w <- as.data.frame(df_associations_w_BH)
+df_cov_w$perc_contrib <- w_eig[1:18, "w_eig"]
+
+## reorder
+df_cov_w <- dplyr::select(df_cov_w, perc_contrib, everything())
+```
+
+## save covariate dfs
+```{r}
+write.csv(df_cov_bray, "../output/covariate_bray.csv")
+write.csv(df_cov_uw, "../output/covariate_uw.csv")
+write.csv(df_cov_w, "../output/covariate_w.csv")
+```
+
+## plot covariate associations
+```{r}
+# bray
+df_associations_bray_BH_df <- as.data.frame(df_associations_bray_BH)
+
+df_associations_bray_BH_df$axis <- rownames(df_associations_bray_BH_df)
+
+## convert format
+df_associations_bray_BH_long <- pivot_longer(df_associations_bray_BH_df, !axis, names_to = "covariate", values_to = "padj")
+
+## order by axis
+df_associations_bray_BH_long <- mutate(df_associations_bray_BH_long, axis = factor(axis, levels = unique(rownames(df_associations_bray_BH_df))))
+
+ggplot(df_associations_bray_BH_long, aes(x = covariate, y = axis, fill = padj)) +
+  geom_tile() +
+  scale_fill_gradient(high="white", low="#009194", limits=c(0,1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  labs(x = "Covariate", y = "Axis")
+
+# uw
+df_associations_uw_BH_df <- as.data.frame(df_associations_uw_BH)
+
+df_associations_uw_BH_df$axis <- rownames(df_associations_uw_BH_df)
+
+## convert format
+df_associations_uw_BH_long <- pivot_longer(df_associations_uw_BH_df, !axis, names_to = "covariate", values_to = "padj")
+
+## order by axis
+df_associations_uw_BH_long <- mutate(df_associations_uw_BH_long, axis = factor(axis, levels = unique(rownames(df_associations_uw_BH_df))))
+
+ggplot(df_associations_uw_BH_long, aes(x = covariate, y = axis, fill = padj)) +
+  geom_tile() +
+  scale_fill_gradient(high="white", low="#009194", limits=c(0,1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  labs(x = "Covariate", y = "Axis")
+
+# w
+df_associations_w_BH_df <- as.data.frame(df_associations_w_BH)
+
+df_associations_w_BH_df$axis <- rownames(df_associations_w_BH_df)
+
+## convert format
+df_associations_w_BH_long <- pivot_longer(df_associations_w_BH_df, !axis, names_to = "covariate", values_to = "padj")
+
+## order by axis
+df_associations_w_BH_long <- mutate(df_associations_w_BH_long, axis = factor(axis, levels = unique(rownames(df_associations_w_BH_df))))
+
+ggplot(df_associations_w_BH_long, aes(x = covariate, y = axis, fill = padj)) +
+  geom_tile() +
+  scale_fill_gradient(high="white", low="#009194", limits=c(0,1))+
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust=0.95)) +
+  labs(x = "Covariate", y = "Axis")
+```
+
+## check for random effects
+```{r}
+df_comb_bray$i.PatientID <- as.factor(df_comb_bray$i.PatientID)
+df_comb_uw$i.PatientID <- as.factor(df_comb_uw$i.PatientID)
+df_comb_w$i.PatientID <- as.factor(df_comb_w$i.PatientID)
+
+# patientID
+## bray
+### set up vec
+patient_rand_bray <- c()
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(bray_vec)){
+  full_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_bray)
+  reduced_model <- lm(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")), data = df_comb_bray)
+  lr <- lrtest(full_model, reduced_model)
+  patient_rand_bray <- c(patient_rand_bray, lr["2", "Pr(>Chisq)"])
+  print(n)
+  n = n + 1
+}
+
+df_cov_bray$patient_rand <- patient_rand_bray
+
+## uw
+### set up vec
+patient_rand_uw <- c()
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(uw_vec)){
+  full_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_uw)
+  reduced_model <- lm(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")), data = df_comb_uw)
+  lr <- lrtest(full_model, reduced_model)
+  patient_rand_uw <- c(patient_rand_uw, lr["2", "Pr(>Chisq)"])
+  print(n)
+  n = n + 1
+}
+
+df_cov_uw$patient_rand <- patient_rand_uw
+
+## w
+### set up vec
+patient_rand_w <- c()
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(w_vec)){
+  full_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_w)
+  reduced_model <- lm(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")), data = df_comb_w)
+  lr <- lrtest(full_model, reduced_model)
+  patient_rand_w <- c(patient_rand_w, lr["2", "Pr(>Chisq)"])
+  print(n)
+  n = n + 1
+}
+
+df_cov_w$patient_rand <- patient_rand_w
+```
+
+## check for collinearity between variables
+```{r}
+# covariates
+## bray
+### set up df
+cov_collinear_bray <- matrix(nrow = 5, ncol = ncol(bray_vec))
+colnames(cov_collinear_bray) <- colnames(bray_vec)
+rownames(cov_collinear_bray) <- c("i.Sex", "i.Age", "i.OR.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch")
+n = 1
+
+set.seed(123)
+for(i in colnames(cov_collinear_bray)){
+  cov_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_bray)
+  vif_cov <- as.data.frame(vif(cov_model))
+  cov_collinear_bray[,i] <- vif_cov[,3]
+  print(n)
+  n = n + 1
+}
+
+## uw
+### set up df
+cov_collinear_uw <- matrix(nrow = 5, ncol = ncol(uw_vec))
+colnames(cov_collinear_uw) <- colnames(uw_vec)
+rownames(cov_collinear_uw) <- c("i.Sex", "i.Age", "i.OR.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch")
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(cov_collinear_uw)){
+  cov_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_uw)
+  vif_cov <- as.data.frame(vif(cov_model))
+  cov_collinear_uw[,i] <- vif_cov[,3]
+  print(n)
+  n = n + 1
+}
+
+## w
+### set up vec
+cov_collinear_w <- matrix(nrow = 5, ncol = ncol(w_vec))
+colnames(cov_collinear_w) <- colnames(w_vec)
+rownames(cov_collinear_w) <- c("i.Sex", "i.Age", "i.OR.Age", "p.CleanedPCRConcentration", "ex.ExtractionBatch")
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(cov_collinear_w)){
+  cov_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_w)
+  vif_cov <- as.data.frame(vif(cov_model))
+  cov_collinear_w[,i] <- vif_cov[,3]
+  print(n)
+  n = n + 1
+}
+
+
+# variables of interest
+## bray
+### set up df
+collinear_bray <- matrix(ncol = 2, nrow = ncol(bray_vec))
+colnames(collinear_bray) <- c("i.Specimen", "i.Disease")
+rownames(collinear_bray) <- colnames(bray_vec)
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(bray_vec)){
+  spec_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Specimen + i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_bray)
+  vif_spec <- vif(spec_model)
+  collinear_bray[i, "i.Specimen"] <- vif_spec["i.Specimen", "GVIF^(1/(2*Df))"]
+  disease_model <- lm(as.formula(paste0("`", i, "`", "~ i.Disease + i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")), data = df_comb_bray)
+  vif_disease <- vif(disease_model)
+  collinear_bray[i, "i.Disease"] <- vif_disease["i.Disease", "GVIF^(1/(2*Df))"]
+  print(n)
+  n = n + 1
+}
+
+
+## uw
+### set up df
+collinear_uw <- matrix(ncol = 2, nrow = ncol(uw_vec))
+colnames(collinear_uw) <- c("i.Specimen", "i.Disease")
+rownames(collinear_uw) <- colnames(uw_vec)
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(uw_vec)){
+  spec_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Specimen + i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_uw)
+  vif_spec <- vif(spec_model)
+  collinear_uw[i, "i.Specimen"] <- vif_spec["i.Specimen", "GVIF^(1/(2*Df))"]
+  disease_model <- lm(as.formula(paste0("`", i, "`", "~ i.Disease + i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")), data = df_comb_uw)
+  vif_disease <- vif(disease_model)
+  collinear_uw[i, "i.Disease"] <- vif_disease["i.Disease", "GVIF^(1/(2*Df))"]
+  print(n)
+  n = n + 1
+}
+
+## w
+### set up vec
+collinear_w <- matrix(ncol = 2, nrow = ncol(w_vec))
+colnames(collinear_w) <- c("i.Specimen", "i.Disease")
+rownames(collinear_w) <- colnames(w_vec)
+n = 1
+
+### run
+set.seed(123)
+for(i in colnames(w_vec)){
+  spec_model <- lmer(as.formula(paste0("`", i, "`", "~ i.Specimen + i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")), data = df_comb_w)
+  vif_spec <- vif(spec_model)
+  collinear_w[i, "i.Specimen"] <- vif_spec["i.Specimen", "GVIF^(1/(2*Df))"]
+  disease_model <- lm(as.formula(paste0("`", i, "`", "~ i.Disease + i.Sex + i.Age + i.OR.Age + p.CleanedPCRConcentration + ex.ExtractionBatch")), data = df_comb_w)
+  vif_disease <- vif(disease_model)
+  collinear_w[i, "i.Disease"] <- vif_disease["i.Disease", "GVIF^(1/(2*Df))"]
+  print(n)
+  n = n + 1
+}
+```
+
+## correct w/o OR age and check if ORage still associated
+```{r}
+# bray
+## set up df
+bray_corr <- matrix(nrow = nrow(bray_vec), ncol = ncol(bray_vec))
+colnames(bray_corr) <- colnames(bray_vec)
+rownames(bray_corr) <- rownames(bray_vec)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(bray_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")),  data=df_comb_bray)
+  bray_corr[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+
+## check for associations
+df_comb_bray_corr <- cbind(bray_corr, metadata_ps)
+## check if lined up
+identical(rownames(metadata_ps), rownames(bray_corr))
+
+bray_ORage_vector <- c()
+
+set.seed(123)
+for(i in colnames(bray_corr)){
+  obj <- lm(as.formula(paste0(i, "~ i.OR.Age")),  data=df_comb_bray_corr)
+  bray_ORage_vector = c(bray_ORage_vector, summary(obj)$coefficients[,"Pr(>|t|)"][[2]])
+}
+
+## put results in df
+bray_ORage_check <- data.frame(matrix(ncol = 1, nrow = 77))
+rownames(bray_ORage_check) <- colnames(bray_corr)
+colnames(bray_ORage_check) <- c("p_ORage")
+
+bray_ORage_check$p_ORage <- bray_ORage_vector
+
+
+# uw
+## set up df
+uw_corr <- matrix(nrow = nrow(uw_vec), ncol = ncol(uw_vec))
+colnames(uw_corr) <- colnames(uw_vec)
+rownames(uw_corr) <- rownames(uw_vec)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(uw_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")),  data=df_comb_uw)
+  uw_corr[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+
+## check for associations
+df_comb_uw_corr <- cbind(uw_corr, metadata_ps)
+## check if lined up
+identical(rownames(metadata_ps), rownames(uw_corr))
+
+uw_ORage_vector <- c()
+
+set.seed(123)
+for(i in colnames(uw_corr)){
+  obj <- lm(as.formula(paste0(i, "~ i.OR.Age")),  data=df_comb_uw_corr)
+  uw_ORage_vector = c(uw_ORage_vector, summary(obj)$coefficients[,"Pr(>|t|)"][[2]])
+}
+
+## put results in df
+uw_ORage_check <- data.frame(matrix(ncol = 1, nrow = 65))
+rownames(uw_ORage_check) <- colnames(uw_corr)
+colnames(uw_ORage_check) <- c("p_ORage")
+
+uw_ORage_check$p_ORage <- uw_ORage_vector
+
+
+# w
+## set up df
+w_corr <- matrix(nrow = nrow(w_vec), ncol = ncol(w_vec))
+colnames(w_corr) <- colnames(w_vec)
+rownames(w_corr) <- rownames(w_vec)
+
+n = 1
+
+set.seed(123)
+for(i in colnames(w_corr)){
+  obj <- lmer(as.formula(paste0("`", i, "`", "~ i.Sex + i.Age + p.CleanedPCRConcentration + ex.ExtractionBatch + (1 | i.PatientID)")),  data=df_comb_w)
+  w_corr[, i] <- resid(obj)
+  n = n + 1
+  print(n)
+}
+
+## check for associations
+df_comb_w_corr <- cbind(w_corr, metadata_ps)
+## check if lined up
+identical(rownames(metadata_ps), rownames(w_corr))
+
+w_ORage_vector <- c()
+
+set.seed(123)
+for(i in colnames(w_corr)){
+  obj <- lm(as.formula(paste0(i, "~ i.OR.Age")),  data=df_comb_w_corr)
+  w_ORage_vector = c(w_ORage_vector, summary(obj)$coefficients[,"Pr(>|t|)"][[2]])
+}
+
+## put results in df
+w_ORage_check <- data.frame(matrix(ncol = 1, nrow = 19))
+rownames(w_ORage_check) <- colnames(w_corr)
+colnames(w_ORage_check) <- c("p_ORage")
+
+w_ORage_check$p_ORage <- w_ORage_vector
+```
+
+## generate rarefaction curves
+```{r}
+# function for rarefaction curve
+calculate_rarefaction_curves <- function(psdata, measures, depths, parallel=FALSE) {
+  require('plyr') # ldply
+  require('reshape2') # melt
+  require('doParallel')
+
+  # set parallel options if required
+  if (parallel) {
+    paropts  <- list(.packages=c("phyloseq", "reshape2"))
+  } else {
+    paropts  <- NULL
+  }
+
+  estimate_rarified_richness <- function(psdata, measures, depth) {
+    if(max(sample_sums(psdata)) < depth) return()
+    psdata <- prune_samples(sample_sums(psdata) >= depth, psdata)
+
+    rarified_psdata <- rarefy_even_depth(psdata, depth, verbose = FALSE)
+
+    alpha_diversity <- estimate_richness(rarified_psdata, measures = measures)
+
+    # as.matrix forces the use of melt.array, which includes the Sample names (rownames)
+    molten_alpha_diversity <- melt(as.matrix(alpha_diversity), varnames = c('Sample', 'Measure'), value.name = 'Alpha_diversity')
+
+    molten_alpha_diversity
+  }
+
+  names(depths) <- depths # this enables automatic addition of the Depth to the output by ldply
+  rarefaction_curve_data <- ldply(depths, estimate_rarified_richness, psdata = phyloseq_prunetaxa, measures = measures, .id = 'Depth', .progress = ifelse(interactive() && ! parallel, 'text', 'none'), .parallel=parallel, .paropts=paropts)
+
+  # convert Depth from factor to numeric
+  rarefaction_curve_data$Depth <- as.numeric(levels(rarefaction_curve_data$Depth))[rarefaction_curve_data$Depth]
+
+  rarefaction_curve_data
+}
+
+# calculate rarefaction curves
+rarefaction_curve_data <- calculate_rarefaction_curves(phyloseq_sampleReads, c('Observed', 'Shannon'), rep(c(1, 10, 100, 1000, 1:100 * 10000), each = 10))
+summary(rarefaction_curve_data)
+
+rarefaction_curve_data_summary <- ddply(rarefaction_curve_data, c('Depth', 'Sample', 'Measure'), summarise, Alpha_diversity_mean = mean(Alpha_diversity), Alpha_diversity_sd = sd(Alpha_diversity))
+
+rarefaction_curve_data_summary_verbose <- merge(rarefaction_curve_data_summary, data.frame(sample_data(phyloseq_sampleReads)), by.x = 'Sample', by.y = 'row.names')
+
+# plot rarefaction curves
+rarefy <- ggplot(
+  data = rarefaction_curve_data_summary_verbose,
+  mapping = aes(
+    x = Depth,
+    y = Alpha_diversity_mean,
+    ymin = Alpha_diversity_mean - Alpha_diversity_sd,
+    ymax = Alpha_diversity_mean + Alpha_diversity_sd,
+    colour = i.Specimen,
+    group = Sample,
+  )
+) + geom_line(alpha = 0.5
+) + geom_point(alpha = 0.5) + 
+  scale_color_manual(name=NULL,
+                    values=threecolors,
+                    breaks=c("Terminal Ileum", "Cecum", "Right Colon"),
+                    labels=c("Terminal Ileum", "Cecum", "Right Colon")) +
+  facet_wrap(
+  facets = ~ Measure,
+  scales = 'free_y'
+)
+
+# ggsave(file = "figures/rarefy.pdf", plot = rarefy, width=8, height=6)
+
+# function for calculating alpha diversity
+ compute_alphadiv<-function(phyloseqobj,trials,rarefaction_depth){
+    min_lib = rarefaction_depth
+    nsamp = phyloseq::nsamples(phyloseqobj)
+    trials = trials
+    tree = phy_tree(phyloseqobj)
+   
+    richness <- matrix(nrow = nsamp, ncol = trials)
+    row.names(richness) <- sample_names(phyloseqobj)
+    
+    evennessF <- matrix(nrow = nsamp, ncol = trials)
+    row.names(evennessF) <- sample_names(phyloseqobj)
+    
+    evennessS <- matrix(nrow = nsamp, ncol = trials)
+    row.names(evennessS) <- sample_names(phyloseqobj)
+    
+    evennessI <- matrix(nrow = nsamp, ncol = trials)
+    row.names(evennessI) <- sample_names(phyloseqobj)
+    
+    faiths <- matrix(nrow = nsamp, ncol = trials)
+    row.names(faiths) <- sample_names(phyloseqobj)
+  
+    set.seed(007)
+    for (i in 1:trials) {
+      # Subsample
+      r <- rarefy_even_depth(phyloseqobj, sample.size = min_lib, verbose = TRUE, replace = TRUE)
+      
+      # Calculate richness
+      rich <- as.numeric(as.matrix(estimate_richness(r, measures = "Observed")))
+      richness[ ,i] <- rich
+      
+      # Calculate evenness Fisher
+      evenF <- as.numeric(as.matrix(estimate_richness(r, measures = "Fisher")))
+      evennessF[ ,i] <- evenF
+    
+      # Calculate evenness Shannon
+      evenS <- as.numeric(as.matrix(estimate_richness(r, measures = "Shannon")))
+      evennessS[ ,i] <- evenS
+      
+      # Calculate evenness Simpson
+      evenI <- as.numeric(as.matrix(estimate_richness(r, measures = "Simpson")))
+      evennessI[ ,i] <- evenI
+      
+      # calculate faith's PD
+      pd_all <- pd(as.matrix(r@otu_table), tree, include.root=TRUE)
+      pd_extract <- subset(pd_all, select = -c(SR))
+      faithspd <- as.numeric(as.matrix(pd_extract))
+      faiths[ ,i] <- faithspd
+    }
+  
+    s.SequencingID <- row.names(richness)
+    mean <- apply(richness, 1, mean)
+    sd <- apply(richness, 1, sd)
+    measure <- rep("Richness", nsamp)
+    rich_stats <- data.frame(s.SequencingID, mean, sd, measure)
+  
+    s.SequencingID <- row.names(evennessF)
+    mean <- apply(evennessF, 1, mean)
+    sd <- apply(evennessF, 1, sd)
+    measure <- rep("Fisher", nsamp)
+    even_statsF <- data.frame(s.SequencingID, mean, sd, measure)
+  
+    s.SequencingID <- row.names(evennessS)
+    mean <- apply(evennessS, 1, mean)
+    sd <- apply(evennessS, 1, sd)
+    measure <- rep("Shannon", nsamp)
+    even_statsS <- data.frame(s.SequencingID, mean, sd, measure)
+  
+    s.SequencingID <- row.names(evennessI)
+    mean <- apply(evennessI, 1, mean)
+    sd <- apply(evennessI, 1, sd)
+    measure <- rep("Simpson", nsamp)
+    even_statsI <- data.frame(s.SequencingID, mean, sd, measure)
+    
+    s.SequencingID <- row.names(faiths)
+    mean <- apply(faiths, 1, mean)
+    sd <- apply(faiths, 1, sd)
+    measure <- rep("Faiths", nsamp)
+    faiths_stats <- data.frame(s.SequencingID, mean, sd, measure)
+  
+    alpha <- rbind(rich_stats, even_statsF, even_statsS, even_statsI, faiths_stats)
+  
+    s <- data.frame(sample_data(phyloseqobj))
+    alphadiv <- merge(alpha, s, by = "s.SequencingID")
+    alphadiv$rarefaction=rep(min_lib,dim(alphadiv)[1])
+    return(alphadiv)
+ } 
+ 
+# calculate alpha diversity - include number of trials, number of sequences to subsample
+set.seed(100)
+rfxn <- compute_alphadiv(phyloseq_sampleReads,1000,65467) # this might take a couple hours to run
+```
+
+## save rfxn
+```{r}
+write.csv(rfxn, file = "../output/rfxn_uncorrect.csv")
+```
+
+## baseline stats
+```{r}
+# samples per location prep
+df.mat_micro <- as.matrix(phyloseq_sampleReads@sam_data) # Put sample_data into a ggplot-friendly data.frame
+df.mat_micro <- as.data.frame(df.mat_micro)
+df.mat_micro <- subset(df.mat_micro, i.Disease == "Crohns")
+df_spec_micro <- df.mat_micro[,c("i.Specimen"), drop=FALSE]
+
+# how many samples per location?
+df_spec_micro %>% 
+  group_by(i.Specimen) %>%
+  dplyr::count()
+```
+
