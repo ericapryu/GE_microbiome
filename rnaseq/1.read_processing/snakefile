@@ -1,0 +1,73 @@
+# The purpose of this script is to QC the microbiome reads and remove host contaminants 
+
+# define input variables - modify as needed
+initial_input_dir="data/raw/"
+star_ref="data/STAR_genome"
+star_anno="data/STAR_genome/GCA_000001405.15_GRCh38_full_analysis_set.refseq_annotation.gtf"
+conda_env="STAR.yml"
+threads=15
+
+# define input file variable - DO NOT CHANGE
+fastq_input=initial_input_dir+"{sample}.fastq.gz"
+
+# define sample files 
+(SAMPLES,)=glob_wildcards(os.path.join(initial_input_dir,"{sample}.fastq.gz"))
+
+# rules 
+rule all:
+    input:
+        # initial fastqc
+        expand("output/1.fastqc_initial/{sample}_fastqc.{extension}", sample=SAMPLES, extension=["zip","html"]),
+        # count_matrix
+        "output/3.feature_counts/reverse_counts.txt"
+
+rule fastqc_initial:
+    input:
+        fastq_input
+    output:
+        "output/1.fastqc_initial/{sample}_fastqc.html",
+        "output/1.fastqc_initial/{sample}_fastqc.zip"
+    params:
+        dir="output/1.fastqc_initial"
+    threads: threads
+    shell:
+        "mkdir -p {params.dir};"
+        "module load fastqc;"
+        "module load jdk;"
+        "fastqc -t {threads} {input} -o {params.dir}"
+
+rule star_align:
+    input:
+        fastq=fastq_input,
+        anno=star_anno
+    output:
+        "output/2.star/{sample}Aligned.sortedByCoord.out.bam"
+    params: 
+        ref=star_ref,
+        prefix="output/2.star/{sample}"
+    conda:
+        conda_env
+    threads: threads
+    shell:
+        '''
+        STAR \
+            --runThreadN {threads} \
+            --genomeDir {params.ref} \
+            --readFilesIn {input.fastq} \
+            --sjdbGTFfile {input.anno} \
+            --outFileNamePrefix {params.prefix} \
+            --outSAMtype BAM SortedByCoordinate \
+            --readFilesCommand zcat
+        '''
+
+rule feature_counts:
+    input:
+        bam=expand("output/2.star/{sample}Aligned.sortedByCoord.out.bam", sample=SAMPLES),
+        anno=star_anno
+    output:
+        "output/3.feature_counts/reverse_counts.txt"
+    conda:
+        conda_env
+    threads: threads
+    shell:
+        "featureCounts -T {threads} -s 2 -g gene_id -a {input.anno} -o {output} {input.bam}"
