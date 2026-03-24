@@ -50,11 +50,11 @@ All package info is in the R script `package_info.R`
     - `2.2.PCA_outlier_removal.Rmd`
     - `2.3.dream.Rmd`
 ### GE-microbiome integration
-    - `1.overall_association.Rmd`
-    - `2.group_association.Rmd`
-    - `3.1.ind_association_prep.Rmd`
-    - `3.2.enet_run_submission_script.sh`
-    - `3.2.enet_run.R`
-    - `3.3.enet_run_region_submission_script.sh`
-    - `3.3.enet_run_region.R`
-    - `3.4.ind_association_analysis.Rmd`
+- `1.overall_association.Rmd`
+- `2.group_association.Rmd`
+- `3.1.ind_association_prep.Rmd`
+- `3.2.enet_run_submission_script.sh`
+- `3.2.enet_run.R`
+- `3.3.enet_run_region_submission_script.sh`
+- `3.3.enet_run_region.R`
+- `3.4.ind_association_analysis.Rmd`
