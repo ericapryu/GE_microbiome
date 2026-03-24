@@ -31,22 +31,30 @@ All package info is in the R script `package_info.R`
     - `1.1.host_decontam_snakemake_submission.sh`
     - `1.2.read_counts_per_step.sh`
 2. Infer ASVs
+    - `2.1.train_classifier.sh`
+    - `2.2.deblur.sh`
 3. Microbiome analysis
+    - `3.1.qiime_to_phyloseq.Rmd`
+    - `3.2.pos_control.Rmd`
+    - `3.3.benchmark_crosscontam.Rmd`
+    - `3.4.env_decontamination.Rmd`
+    - `3.5.additionalQC_covariate.Rmd`
+    - `3.6.microbiome_characterization.Rmd`
+    - `3.7.differential_abundance.Rmd`
 ### RNA-seq
-
-
-1. `oral_phyloseq.Rmd` - clean 16S rRNA gene amplicon sequence data and generate phyloseq object
-2. `decontam.Rmd` - remove potential contaminants
-3. `qc.Rmd` - additional QC and cleaning of the phyloseq object
-4. `extraction_comparison.Rmd` - compare Qiagen and PowerSoil extraction kit data
-5. `microbiome_characterization.Rmd` - examine metrics for standard microbiome characteristics (alpha and beta diversity)
-6. `random_forest.Rmd` - use Random Forests to predict lifestyle based on lifestyle survey and microbiome data
-7. `differential_abundance.Rmd` - perform differential abundance analysis with ALDEx2 to identify taxa that differ based on lifestyle
-8. `microbiome_trend.Rmd` - perform trend test on all genera to see which microbial abundances follow the lifestyle trend
-9. `CCA.Rmd` - conduct CCA to identify which specific lifestyle factors correlate with microbiome composition
-10. `taxa_lifestyle.Rmd` - identify significant associations between specific lifestyle factors and DA microbes identified from the trend test.
-11. `picrust2_prep.Rmd` - prepping data for PICRUSt2
-12. `picrust_stratified.sh` (shell) - run stratified version of PICRUSt2 to predict pathway abundances.
-13. `picrust_analysis.Rmd` - analyze PICRUSt2 output. All PICRUSt2 output from `picrust_stratified.sh` is assumed to be stored in its own directory `picrust2_qiagen_output\`
-14. `network_analysis.Rmd` - conduct network analysis of the microbiome using SparCC
-15. `gut_oral_comparison.Rmd` - examine the relationship between the oral and gut microbiomes
+1. Read processing
+    - `1.1.rnaseq_snakemake_submission.sh`
+    - `1.2.star_output_stats.Rmd`
+2. RNA-seq analysis
+    - `2.1.cov_correction.Rmd`
+    - `2.2.PCA_outlier_removal.Rmd`
+    - `2.3.dream.Rmd`
+### GE-microbiome integration
+- `1.overall_association.Rmd`
+- `2.group_association.Rmd`
+- `3.1.ind_association_prep.Rmd`
+- `3.2.enet_run_submission_script.sh`
+- `3.2.enet_run.R`
+- `3.3.enet_run_region_submission_script.sh`
+- `3.3.enet_run_region.R`
+- `3.4.ind_association_analysis.Rmd`
