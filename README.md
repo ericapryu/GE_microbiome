@@ -15,7 +15,7 @@ GE_microbiome
 |- README                           # Description of analysis scripts
 |
 |- microbiome/                      # Microbiome data processing and analyses
-|       |- 1.qc_host_decontam/      # Microbiome decontamination pipeline
+|       |- 1.qc_host_decontam/      # Microbiome decontamination pipeline 
 |           |- data/                # Any data put into analyses
 |           |- log/                 # Log for submitted batch jobs
 |           |- output/              # Will contain output from scripts after they are run
@@ -27,9 +27,11 @@ GE_microbiome
 |- RNAseq/                          # Gene expression processing and analyses
 |       |- 1.read_processing/       # RNA-seq data processing
 |       |- 2.rnaseq_analysis/       # Gene expression analyses
+|
 |- mic_rna_integration/             # Gene expression-microbiome integration analyses
 +
 ```
+Note: The structure outlined in `1.qc_host_decontam\` is similar in other processing and analyses folders (detailed above), but kept simple here for clarity.
 
 All package info is in the R script `package_info.R`
 
