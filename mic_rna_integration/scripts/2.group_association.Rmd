@@ -507,7 +507,7 @@ CCA_sig <- cbind(CCA_pval, CCA_padj)
 
 rownames(CCA_sig) <- paste0("comp_", 1:10)
 
-# write.csv(CCA_sig, "../output/CCA_sig.csv")
+write.csv(CCA_sig, "../output/CCA_sig.csv")
 ```
 
 ## plot components
@@ -697,8 +697,8 @@ comp3_wkegg_path$Description <- pathway_list$description[match(comp3_wkegg_path$
 ## save
 ```{r}
 # ## save
-# write.csv(comp1_wkegg_path, "../output/comp1_wkegg_path.csv")
-# write.csv(comp3_wkegg_path, "../output/comp3_wkegg_path.csv")
+write.csv(comp1_wkegg_path, "../output/comp1_wkegg_path.csv")
+write.csv(comp3_wkegg_path, "../output/comp3_wkegg_path.csv")
 ```
 
 ## filter data by region
@@ -886,9 +886,9 @@ rownames(CCA_sig_C) <- paste0("comp_", 1:10)
 CCA_sig_RC <- cbind(CCA_pval_RC, CCA_padj_RC)
 rownames(CCA_sig_RC) <- paste0("comp_", 1:10)
 
-# write.csv(CCA_sig_TI, "../output/CCA_sig_TI.csv")
-# write.csv(CCA_sig_C, "../output/CCA_sig_C.csv")
-# write.csv(CCA_sig_RC, "../output/CCA_sig_RC.csv")
+write.csv(CCA_sig_TI, "../output/CCA_sig_TI.csv")
+write.csv(CCA_sig_C, "../output/CCA_sig_C.csv")
+write.csv(CCA_sig_RC, "../output/CCA_sig_RC.csv")
 ```
 
 ## save components
@@ -1111,12 +1111,12 @@ comp1_C_enrich_filt <- filter(comp1_C_enrich_out, p.adjust < 0.1 & Count >= 10)
 comp6_C_enrich_filt <- filter(comp6_C_enrich_out, p.adjust < 0.1 & Count >= 10)
 
 ## save
-# write.csv(comp1_TI_enrich_filt, "../output/comp1_TI_enrich_filt.csv")
-# write.csv(comp2_TI_enrich_filt, "../output/comp2_TI_enrich_filt.csv")
-# write.csv(comp3_TI_enrich_filt, "../output/comp3_TI_enrich_filt.csv")
-# write.csv(comp9_TI_enrich_filt, "../output/comp9_TI_enrich_filt.csv")
-# write.csv(comp1_C_enrich_filt, "../output/comp1_C_enrich_filt.csv")
-# write.csv(comp6_C_enrich_filt, "../output/comp6_C_enrich_filt.csv")
+write.csv(comp1_TI_enrich_filt, "../output/comp1_TI_enrich_filt.csv")
+write.csv(comp2_TI_enrich_filt, "../output/comp2_TI_enrich_filt.csv")
+write.csv(comp3_TI_enrich_filt, "../output/comp3_TI_enrich_filt.csv")
+write.csv(comp9_TI_enrich_filt, "../output/comp9_TI_enrich_filt.csv")
+write.csv(comp1_C_enrich_filt, "../output/comp1_C_enrich_filt.csv")
+write.csv(comp6_C_enrich_filt, "../output/comp6_C_enrich_filt.csv")
 ```
 
 ## plot
@@ -1141,6 +1141,6 @@ comp9_TI_wkegg_path$Description <- pathway_list$description[match(comp9_TI_wkegg
 ## save
 ```{r}
 # ## save
-# write.csv(comp2_TI_wkegg_path, "../output/comp2_TI_wkegg_path.csv")
-# write.csv(comp9_TI_wkegg_path, "../output/comp9_TI_wkegg_path.csv")
+write.csv(comp2_TI_wkegg_path, "../output/comp2_TI_wkegg_path.csv")
+write.csv(comp9_TI_wkegg_path, "../output/comp9_TI_wkegg_path.csv")
 ```
