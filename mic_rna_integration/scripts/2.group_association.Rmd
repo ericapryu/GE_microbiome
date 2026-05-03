@@ -548,6 +548,11 @@ save_CCA_components(cca[[1]],sig,dirname)
 getwd()
 
 saveRDS(cca, file = "../output/ALL_REGION_cca.RDS")
+
+## writing all components
+dirname <- paste0(current_dir,"/../output/ALL_REGION_all_comps")
+save_CCA_components(cca[[1]],1:10,dirname)
+
 ```
 
 ## extract significant components and switch to entrez IDs
@@ -700,6 +705,31 @@ comp3_wkegg_path$Description <- pathway_list$description[match(comp3_wkegg_path$
 write.csv(comp1_wkegg_path, "../output/comp1_wkegg_path.csv")
 write.csv(comp3_wkegg_path, "../output/comp3_wkegg_path.csv")
 ```
+
+## table of KEGG results for all significant components
+```{r}
+comp1_enrich_filt_app <- comp1_enrich_filt
+comp2_enrich_filt_app <- comp2_enrich_filt
+comp3_enrich_filt_app <- comp3_enrich_filt
+comp4_enrich_filt_app <- comp4_enrich_filt
+comp10_enrich_filt_app <- comp10_enrich_filt
+
+comp1_enrich_filt_app$component <- "comp01"
+comp2_enrich_filt_app$component <- "comp02"
+comp3_enrich_filt_app$component <- "comp03"
+comp4_enrich_filt_app$component <- "comp04"
+comp10_enrich_filt_app$component <- "comp10"
+
+comp_KEGG_results <- rbind(comp1_enrich_filt_app, comp2_enrich_filt_app)
+comp_KEGG_results <- rbind(comp_KEGG_results, comp3_enrich_filt_app)
+comp_KEGG_results <- rbind(comp_KEGG_results, comp4_enrich_filt_app)
+comp_KEGG_results <- rbind(comp_KEGG_results, comp10_enrich_filt_app)
+
+comp_KEGG_results$Description <- pathway_list$description[match(comp_KEGG_results$Description, pathway_list$map)]
+
+write.csv(comp_KEGG_results, "../output/comp_KEGG_results.csv")
+```
+
 
 ## filter data by region
 ```{r}
@@ -905,6 +935,16 @@ save_CCA_components(cca_C[[1]],sig_C,dirname_C)
 sig_RC <- which(CCA_pval_RC < sig_cutoff)
 dirname_RC <- paste0(current_dir,"/../output/RC_")
 save_CCA_components(cca_RC[[1]],sig_RC,dirname_RC)
+
+## writing all components
+dirname_TI <- paste0(current_dir,"/../output/TI_all_comps")
+save_CCA_components(cca_TI[[1]],1:10,dirname_TI)
+
+dirname_C <- paste0(current_dir,"/../output/C_all_comps")
+save_CCA_components(cca_C[[1]],1:10,dirname_C)
+
+dirname_RC <- paste0(current_dir,"/../output/RC_all_comps")
+save_CCA_components(cca_RC[[1]],1:10,dirname_RC)
 ```
 
 ## plot components
