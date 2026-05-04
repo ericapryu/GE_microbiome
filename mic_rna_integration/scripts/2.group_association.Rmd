@@ -730,7 +730,6 @@ comp_KEGG_results$Description <- pathway_list$description[match(comp_KEGG_result
 write.csv(comp_KEGG_results, "../output/comp_KEGG_results.csv")
 ```
 
-
 ## filter data by region
 ```{r}
 rna_meta_TI <- subset(rna_meta_CD_reorder, i.Specimen == "Terminal Ileum")
@@ -1183,4 +1182,31 @@ comp9_TI_wkegg_path$Description <- pathway_list$description[match(comp9_TI_wkegg
 # ## save
 write.csv(comp2_TI_wkegg_path, "../output/comp2_TI_wkegg_path.csv")
 write.csv(comp9_TI_wkegg_path, "../output/comp9_TI_wkegg_path.csv")
+```
+
+## table of KEGG results for all significant components by region
+```{r}
+comp1_TI_enrich_filt_app <- comp1_TI_enrich_filt
+comp2_TI_enrich_filt_app <- comp2_TI_enrich_filt
+comp3_TI_enrich_filt_app <- comp3_TI_enrich_filt
+comp9_TI_enrich_filt_app <- comp9_TI_enrich_filt
+comp1_C_enrich_filt_app <- comp1_C_enrich_filt
+comp6_C_enrich_filt_app <- comp6_C_enrich_filt
+
+comp1_TI_enrich_filt_app$component <- "TI_comp01"
+comp2_TI_enrich_filt_app$component <- "TI_comp02"
+comp3_TI_enrich_filt_app$component <- "TI_comp03"
+comp9_TI_enrich_filt_app$component <- "TI_comp09"
+comp1_C_enrich_filt_app$component <- "C_comp01"
+comp6_C_enrich_filt_app$component <- "C_comp06"
+
+comp_region_KEGG_results <- rbind(comp1_TI_enrich_filt_app, comp2_TI_enrich_filt_app)
+comp_region_KEGG_results <- rbind(comp_region_KEGG_results, comp3_TI_enrich_filt_app)
+comp_region_KEGG_results <- rbind(comp_region_KEGG_results, comp9_TI_enrich_filt_app)
+comp_region_KEGG_results <- rbind(comp_region_KEGG_results, comp1_C_enrich_filt_app)
+comp_region_KEGG_results <- rbind(comp_region_KEGG_results, comp6_C_enrich_filt_app)
+
+comp_region_KEGG_results$Description <- pathway_list$description[match(comp_region_KEGG_results$Description, pathway_list$map)]
+
+write.csv(comp_region_KEGG_results, "../output/comp_region_KEGG_results.csv")
 ```
