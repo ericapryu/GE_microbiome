@@ -15,7 +15,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## import stats
 ```{r}
-stats <- read.table("../output/full_star_stats.txt", sep = ";", header = TRUE, fill=TRUE)
+stats <- read.table("../../1.read_processing/output/2.star/full_star_stats.txt", sep = ";", header = TRUE, fill=TRUE)
 ```
 
 ## import libraries
