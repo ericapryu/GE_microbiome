@@ -320,6 +320,10 @@ all_enet_coef_df <- rbind(all_enet_coef_df, RC_enet_coef_df_prep)
 
 ## plot associations of interest
 ```{r}
+TI_df <- cbind(enet_microbe_TI, enet_uni_genes_TI)
+C_df <- cbind(enet_microbe_C, enet_uni_genes_C)
+RC_df <- cbind(enet_microbe_RC, enet_uni_genes_RC)
+
 # TI
 lacto_acat1_TI_plot <- ggplot(TI_df, aes(x = ACAT1, y = Lactococcus)) +
   geom_point() +
