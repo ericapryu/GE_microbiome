@@ -247,32 +247,31 @@ ggsave(file="../figures/procrustes_dist_plot.pdf", plot=procrustes_dist_plot, wi
 df_pro_Y <- data.frame(micro1 = pro$Yrot[,1], micro2 = pro$Yrot[,2])
 df_pro_X <- data.frame(rna1 = pro$X[,1], rna2 = pro$X[,2])
 
-
 procrustes_rna_plot <- ggplot(data = df_pro_X, aes(x = rna1, y = rna2)) +
-  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
   lims(x = c(-0.03, 0.05), y = c(-0.1, 0.11)) +
-  labs(x = "rna PCOA1 (39.8%)",
-       y = "rna PCOA2 (9.3%)")
+  labs(x = "rna PCoA1",
+       y = "rna PCoA2")
 
 ggsave(file="../figures/procrustes_rna_plot.pdf", plot=procrustes_rna_plot, width=3.5, height=3)
   
 
 procrustes_mic_plot <- ggplot(data = df_pro_Y, aes(x = micro1, y = micro2)) +
-  geom_point(color = c("black"), pch = 21, size = 3) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
   lims(x = c(-0.03, 0.05), y = c(-0.1, 0.11)) +
-  labs(x = "micro PCOA1 (6.8%)",
-       y = "micro PCOA2 (4.9%)")
+  labs(x = "microbiome PCoA1",
+       y = "microbiome PCoA2")
 
 ggsave(file="../figures/procrustes_mic_plot.pdf", plot=procrustes_mic_plot, width=3.5, height=3)
 
 
 procrustes_rna_mic_plot <- ggplot() +
-  geom_point(data = df_pro_X, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
-  geom_point(data = df_pro_Y, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_point(data = df_pro_X, color = c("black"), pch = 21, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y, color = c("#009194"), pch = 16, size = 3, aes(x = micro1, y = micro2)) +
   geom_segment(alpha = 0.3, aes(x = df_pro_Y$micro1, y = df_pro_Y$micro2), xend = df_pro_X$rna1, yend = df_pro_X$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
   lims(x = c(-0.03, 0.05), y = c(-0.1, 0.11)) +
-  labs(x = "Dim 1",
-       y = "Dim 2")
+  labs(x = "PCoA1",
+       y = "PCoA2")
 
 ggsave(file="../figures/procrustes_rna_mic_plot.pdf", plot=procrustes_rna_mic_plot, width=4, height=3.5)
 ```
@@ -407,8 +406,9 @@ pro_nonper_TI <- pro_TI$t0
 procrustes_dist_plot_TI <- ggplot(data = pro_vals_TI, aes(x = pro_vals_TI)) +
   geom_histogram(binwidth = 0.01, fill = "dark grey") +
     geom_vline(xintercept = pro_nonper_TI, lty = 2, color = "red") +
-    labs(x = "Procrustes distribution", y = "Count") +
-    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    labs(x = "Procrustes correlations", y = "Count") +
+    scale_y_continuous(expand =  expansion(mult = c(0, 0.05))) +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95), axis.line.x = element_line(colour = 'black', linewidth = 0.2, linetype='solid'), axis.line.y = element_line(colour = 'black', linewidth = 0.2, linetype='solid')) +
     theme(legend.position = "none")
 
 ggsave(file="../figures/procrustes_dist_plot_TI.pdf", plot=procrustes_dist_plot_TI, width=4, height=3)
@@ -419,30 +419,30 @@ df_pro_X_TI <- data.frame(rna1 = pro_TI$X[,1], rna2 = pro_TI$X[,2])
 
 
 procrustes_rna_plot_TI <- ggplot(data = df_pro_X_TI, aes(x = rna1, y = rna2)) +
-  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "rna PCOA1 (19.3%)",
-       y = "rna PCOA2 (10.2%)")
+  labs(x = "rna PCoA1",
+       y = "rna PCoA2")
 
 ggsave(file="../figures/procrustes_rna_plot_TI.pdf", plot=procrustes_rna_plot_TI, width=3.5, height=3)
   
 
 procrustes_mic_plot_TI <- ggplot(data = df_pro_Y_TI, aes(x = micro1, y = micro2)) +
-  geom_point(color = c("black"), pch = 21, size = 3) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "micro PCOA1 (9.0%)",
-       y = "micro PCOA2 (6.9%)")
+  labs(x = "microbiome PCoA1",
+       y = "microbiome PCoA2")
 
 ggsave(file="../figures/procrustes_mic_plot_TI.pdf", plot=procrustes_mic_plot_TI, width=3.5, height=3)
 
 
 procrustes_rna_mic_plot_TI <- ggplot() +
-  geom_point(data = df_pro_X_TI, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
-  geom_point(data = df_pro_Y_TI, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_point(data = df_pro_X_TI, color = c("black"), pch = 21, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y_TI, color = c("#009194"), pch = 16, size = 3, aes(x = micro1, y = micro2)) +
   geom_segment(alpha = 0.3, aes(x = df_pro_Y_TI$micro1, y = df_pro_Y_TI$micro2), xend = df_pro_X_TI$rna1, yend = df_pro_X_TI$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "Dim 1",
-       y = "Dim 2")
+  labs(x = "PCoA1",
+       y = "PCoA2")
 
 ggsave(file="../figures/procrustes_rna_mic_plot_TI.pdf", plot=procrustes_rna_mic_plot_TI, width=4, height=3.5)
 
@@ -460,8 +460,9 @@ pro_nonper_C <- pro_C$t0
 procrustes_dist_plot_C <- ggplot(data = pro_vals_C, aes(x = pro_vals_C)) +
   geom_histogram(binwidth = 0.01, fill = "dark grey") +
     geom_vline(xintercept = pro_nonper_C, lty = 2, color = "red") +
-    labs(x = "Procrustes distribution", y = "Count") +
-    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    labs(x = "Procrustes correlations", y = "Count") +
+    scale_y_continuous(expand =  expansion(mult = c(0, 0.05))) +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95), axis.line.x = element_line(colour = 'black', linewidth = 0.2, linetype='solid'), axis.line.y = element_line(colour = 'black', linewidth = 0.2, linetype='solid')) +
     theme(legend.position = "none")
 
 ggsave(file="../figures/procrustes_dist_plot_C.pdf", plot=procrustes_dist_plot_C, width=4, height=3)
@@ -472,30 +473,30 @@ df_pro_X_C <- data.frame(rna1 = pro_C$X[,1], rna2 = pro_C$X[,2])
 
 
 procrustes_rna_plot_C <- ggplot(data = df_pro_X_C, aes(x = rna1, y = rna2)) +
-  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "rna PCOA1 (25.7%)",
-       y = "rna PCOA2 (10.2%)")
+  labs(x = "rna PCoA1",
+       y = "rna PCoA2")
 
 ggsave(file="../figures/procrustes_rna_plot_C.pdf", plot=procrustes_rna_plot_C, width=3.5, height=3)
   
 
 procrustes_mic_plot_C <- ggplot(data = df_pro_Y_C, aes(x = micro1, y = micro2)) +
-  geom_point(color = c("black"), pch = 21, size = 3) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "micro PCOA1 (7.8%)",
-       y = "micro PCOA2 (5.7%)")
+  labs(x = "microbiome PCoA1",
+       y = "microbiome PCoA2")
 
 ggsave(file="../figures/procrustes_mic_plot_C.pdf", plot=procrustes_mic_plot_C, width=3.5, height=3)
 
 
 procrustes_rna_mic_plot_C <- ggplot() +
-  geom_point(data = df_pro_X_C, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
-  geom_point(data = df_pro_Y_C, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_point(data = df_pro_X_C, color = c("black"), pch = 21, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y_C, color = c("#009194"), pch = 16, size = 3, aes(x = micro1, y = micro2)) +
   geom_segment(alpha = 0.3, aes(x = df_pro_Y_C$micro1, y = df_pro_Y_C$micro2), xend = df_pro_X_C$rna1, yend = df_pro_X_C$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "Dim 1",
-       y = "Dim 2")
+  labs(x = "PCoA1",
+       y = "PCoA2")
 
 ggsave(file="../figures/procrustes_rna_mic_plot_C.pdf", plot=procrustes_rna_mic_plot_C, width=4, height=3.5)
 
@@ -513,8 +514,9 @@ pro_nonper_RC <- pro_RC$t0
 procrustes_dist_plot_RC <- ggplot(data = pro_vals_RC, aes(x = pro_vals_RC)) +
   geom_histogram(binwidth = 0.01, fill = "dark grey") +
     geom_vline(xintercept = pro_nonper_RC, lty = 2, color = "red") +
-    labs(x = "Procrustes distribution", y = "Count") +
-    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95)) + 
+    labs(x = "Procrustes correlations", y = "Count") +
+    scale_y_continuous(expand =  expansion(mult = c(0, 0.05))) +
+    theme(axis.text.x = element_text(hjust = 0.95, vjust=0.95), axis.line.x = element_line(colour = 'black', linewidth = 0.2, linetype='solid'), axis.line.y = element_line(colour = 'black', linewidth = 0.2, linetype='solid')) +
     theme(legend.position = "none")
 
 ggsave(file="../figures/procrustes_dist_plot_RC.pdf", plot=procrustes_dist_plot_RC, width=4, height=3)
@@ -525,30 +527,30 @@ df_pro_X_RC <- data.frame(rna1 = pro_RC$X[,1], rna2 = pro_RC$X[,2])
 
 
 procrustes_rna_plot_RC <- ggplot(data = df_pro_X_RC, aes(x = rna1, y = rna2)) +
-  geom_point(color = c("#009194"), pch = 16, size = 3) +
+  geom_point(color = c("black"), pch = 21, size = 3) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "rna PCOA1 (14.0%)",
-       y = "rna PCOA2 (10.4%)")
+  labs(x = "rna PCoA1",
+       y = "rna PCoA2")
 
 ggsave(file="../figures/procrustes_rna_plot_RC.pdf", plot=procrustes_rna_plot_RC, width=3.5, height=3)
   
 
 procrustes_mic_plot_RC <- ggplot(data = df_pro_Y_RC, aes(x = micro1, y = micro2)) +
-  geom_point(color = c("black"), pch = 21, size = 3) +
+  geom_point(color = c("#009194"), pch = 16, size = 3) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "micro PCOA1 (8.4%)",
-       y = "micro PCOA2 (7.8%)")
+  labs(x = "microbiome PCoA1",
+       y = "microbiome PCoA2")
 
 ggsave(file="../figures/procrustes_mic_plot_RC.pdf", plot=procrustes_mic_plot_RC, width=3.5, height=3)
 
 
 procrustes_rna_mic_plot_RC <- ggplot() +
-  geom_point(data = df_pro_X_RC, color = c("#009194"), pch = 16, size = 3, aes(x = rna1, y = rna2)) +
-  geom_point(data = df_pro_Y_RC, color = c("black"), pch = 21, size = 3, aes(x = micro1, y = micro2)) +
+  geom_point(data = df_pro_X_RC, color = c("black"), pch = 21, size = 3, aes(x = rna1, y = rna2)) +
+  geom_point(data = df_pro_Y_RC, color = c("#009194"), pch = 16, size = 3, aes(x = micro1, y = micro2)) +
   geom_segment(alpha = 0.3, aes(x = df_pro_Y_RC$micro1, y = df_pro_Y_RC$micro2), xend = df_pro_X_RC$rna1, yend = df_pro_X_RC$rna2, arrow = arrow(length=unit(0.2,"cm"))) +
   lims(x = c(-0.15, 0.2), y = c(-0.15, 0.16)) +
-  labs(x = "Dim 1",
-       y = "Dim 2")
+  labs(x = "PCoA1",
+       y = "PCoA2")
 
 ggsave(file="../figures/procrustes_rna_mic_plot_RC.pdf", plot=procrustes_rna_mic_plot_RC, width=4, height=3.5)
 ```
